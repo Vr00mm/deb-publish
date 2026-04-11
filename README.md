@@ -9,6 +9,44 @@ A GitHub Action that builds a `.deb` package from a staged directory and publish
 - Exports the public key as `pubkey.gpg` for easy client setup
 - Retries push on concurrent conflicts
 
+## Versioning
+
+The package version is read from the `Version` field in `DEBIAN/control`. Since the control file is static in your repo, you update it at build time — typically from a git tag.
+
+### Update version from a git tag
+
+```yaml
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set package version from tag
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}   # strips the leading v: v1.2.3 → 1.2.3
+          sed -i "s/^Version:.*/Version: $VERSION/" package/DEBIAN/control
+
+      - uses: Vr00mm/deb-publish@v1
+        with:
+          package-path: ./package
+          ...
+```
+
+Every published `.deb` is kept in the pool — users can install a specific version:
+```bash
+sudo apt install my-package=1.2.3
+```
+
+To list available versions:
+```bash
+apt-cache showpkg my-package
+```
+
 ## Usage
 
 ```yaml
