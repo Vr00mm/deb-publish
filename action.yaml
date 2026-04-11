@@ -1,4 +1,4 @@
-name: 'Debian Package Publish'
+name: 'Debian Package Publisher for GitHub Pages'
 description: 'Build and publish a .deb package to an APT repository hosted on GitHub Pages.'
 branding:
   icon: 'archive'
