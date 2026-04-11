@@ -1,11 +1,5 @@
 name: 'Debian Package Publish'
-description: |
-  Build a .deb package from a staged directory and publish it to an APT repository
-  hosted on GitHub Pages.
-
-  The package-path must contain:
-    DEBIAN/control  (package metadata: Package, Version, Architecture, Maintainer, Description)
-    + files laid out in their target filesystem hierarchy (e.g. usr/bin/my-binary)
+description: 'Build and publish a .deb package to an APT repository hosted on GitHub Pages.'
 branding:
   icon: 'archive'
   color: 'orange'
