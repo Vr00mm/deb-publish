@@ -83,14 +83,16 @@ runs:
     - name: Build .deb package
       id: build
       shell: bash
+      env:
+        PACKAGE_PATH: ${{ inputs.package-path }}
       run: |
         mkdir -p /tmp/deb-output
 
         # --root-owner-group ensures all files are owned by root:root inside the package
-        dpkg-deb --build --root-owner-group "${{ inputs.package-path }}" /tmp/deb-output/
+        dpkg-deb --build --root-owner-group "$PACKAGE_PATH" /tmp/deb-output/
 
         DEB_FILE=$(ls /tmp/deb-output/*.deb | head -1)
-        echo "deb-file=$(basename $DEB_FILE)" >> $GITHUB_OUTPUT
+        echo "deb-file=$(basename "$DEB_FILE")" >> $GITHUB_OUTPUT
         echo "package-name=$(dpkg-deb -f "$DEB_FILE" Package)" >> $GITHUB_OUTPUT
         echo "package-version=$(dpkg-deb -f "$DEB_FILE" Version)" >> $GITHUB_OUTPUT
         echo "package-arch=$(dpkg-deb -f "$DEB_FILE" Architecture)" >> $GITHUB_OUTPUT
@@ -105,11 +107,14 @@ runs:
 
     - name: Set up APT repository structure
       shell: bash
+      env:
+        PKG_ARCH: ${{ steps.build.outputs.package-arch }}
+        DIST: ${{ inputs.distribution }}
+        COMP: ${{ inputs.component }}
+        DEB_DIR: ${{ inputs.deb-dir }}
+        PAGES_REPO: ${{ inputs.pages-repo }}
       run: |
-        PKG_ARCH="${{ steps.build.outputs.package-arch }}"
-        DIST="${{ inputs.distribution }}"
-        COMP="${{ inputs.component }}"
-        BASE="_pages/${{ inputs.deb-dir }}"
+        BASE="_pages/$DEB_DIR"
 
         POOL_DIR="$BASE/pool/$COMP"
         BINARY_DIR="$BASE/dists/$DIST/$COMP/binary-$PKG_ARCH"
@@ -127,8 +132,8 @@ runs:
 
         # Generate Release file with checksums
         cd "dists/$DIST"
-        OWNER=$(echo "${{ inputs.pages-repo }}" | cut -d'/' -f1)
-        REPO=$(echo "${{ inputs.pages-repo }}" | cut -d'/' -f2)
+        OWNER=$(echo "$PAGES_REPO" | cut -d'/' -f1)
+        REPO=$(echo "$PAGES_REPO" | cut -d'/' -f2)
         {
           echo "Origin: $OWNER"
           echo "Label: $REPO"
@@ -146,11 +151,13 @@ runs:
       env:
         GPG_PRIVATE_KEY: ${{ inputs.gpg-private-key }}
         GPG_PASSPHRASE: ${{ inputs.gpg-passphrase }}
+        DEB_DIR: ${{ inputs.deb-dir }}
+        DISTRIBUTION: ${{ inputs.distribution }}
       run: |
         echo "$GPG_PRIVATE_KEY" | gpg --batch --yes --import
 
-        RELEASE="_pages/${{ inputs.deb-dir }}/dists/${{ inputs.distribution }}/Release"
-        RELEASE_DIR="$(dirname $RELEASE)"
+        RELEASE="_pages/$DEB_DIR/dists/$DISTRIBUTION/Release"
+        RELEASE_DIR="$(dirname "$RELEASE")"
 
         # Build gpg args; use passphrase-fd to avoid shell injection
         sign() {
@@ -169,24 +176,27 @@ runs:
         sign "--clearsign" "${RELEASE_DIR}/InRelease"
 
         # Export the public key so users can add it to their apt trusted keys
-        gpg --armor --export > "_pages/${{ inputs.deb-dir }}/pubkey.gpg"
+        gpg --armor --export > "_pages/$DEB_DIR/pubkey.gpg"
 
     - name: Commit and push
       shell: bash
       working-directory: _pages
+      env:
+        DEB_DIR: ${{ inputs.deb-dir }}
+        PACKAGE_NAME: ${{ steps.build.outputs.package-name }}
+        PACKAGE_VERSION: ${{ steps.build.outputs.package-version }}
+        PAGES_BRANCH: ${{ inputs.pages-branch }}
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
 
-        git add "${{ inputs.deb-dir }}/"
+        git add "$DEB_DIR/"
         git diff --staged --quiet && echo "No changes to publish." && exit 0
 
-        PKG="${{ steps.build.outputs.package-name }}"
-        VER="${{ steps.build.outputs.package-version }}"
-        git commit -m "chore: publish ${PKG} ${VER} to apt repo"
+        git commit -m "chore: publish ${PACKAGE_NAME} ${PACKAGE_VERSION} to apt repo"
 
         for i in 1 2 3; do
-          git pull --rebase origin ${{ inputs.pages-branch }} && git push && break
+          git pull --rebase origin "$PAGES_BRANCH" && git push && break
           echo "Push attempt $i failed, retrying in $((i * 5))s..."
           sleep $((i * 5))
         done
