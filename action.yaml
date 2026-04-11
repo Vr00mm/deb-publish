@@ -1,0 +1,192 @@
+name: 'Debian Package Publish'
+description: |
+  Build a .deb package from a staged directory and publish it to an APT repository
+  hosted on GitHub Pages.
+
+  The package-path must contain:
+    DEBIAN/control  (package metadata: Package, Version, Architecture, Maintainer, Description)
+    + files laid out in their target filesystem hierarchy (e.g. usr/bin/my-binary)
+branding:
+  icon: 'archive'
+  color: 'orange'
+
+inputs:
+  package-path:
+    description: |
+      Path to the package staging directory.
+      Must contain a DEBIAN/control file and the target files in their
+      install-time filesystem layout (e.g. usr/bin/my-tool, etc/my-app.conf).
+    required: true
+  token:
+    description: 'GitHub token with write access to the pages repository'
+    required: true
+  pages-repo:
+    description: 'Repository hosting the APT repo (owner/repo), e.g. Vr00mm/vr00mm.github.io'
+    required: true
+  pages-branch:
+    description: 'Branch of the pages repository'
+    required: false
+    default: 'master'
+  deb-dir:
+    description: 'Subdirectory in the pages repo for the APT repository'
+    required: false
+    default: 'deb'
+  distribution:
+    description: 'APT distribution name (e.g. stable, focal, jammy)'
+    required: false
+    default: 'stable'
+  component:
+    description: 'APT component (e.g. main, contrib)'
+    required: false
+    default: 'main'
+  pages-url:
+    description: |
+      Base URL of the GitHub Pages site.
+      For a user/org pages repo (owner.github.io): https://owner.github.io
+      For a project repo: https://owner.github.io/repo-name
+    required: true
+  gpg-private-key:
+    description: |
+      ASCII-armored GPG private key for signing the repository.
+      Leave empty to publish without signing (not recommended for production).
+      Export your key with: gpg --armor --export-secret-keys KEY_ID
+    required: false
+    default: ''
+  gpg-passphrase:
+    description: 'Passphrase for the GPG private key. Leave empty if the key has none.'
+    required: false
+    default: ''
+
+outputs:
+  deb-file:
+    description: 'Filename of the built .deb package'
+    value: ${{ steps.build.outputs.deb-file }}
+  package-name:
+    description: 'Package name read from DEBIAN/control'
+    value: ${{ steps.build.outputs.package-name }}
+  package-version:
+    description: 'Package version read from DEBIAN/control'
+    value: ${{ steps.build.outputs.package-version }}
+  package-arch:
+    description: 'Package architecture read from DEBIAN/control'
+    value: ${{ steps.build.outputs.package-arch }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils
+
+    - name: Build .deb package
+      id: build
+      shell: bash
+      run: |
+        mkdir -p /tmp/deb-output
+
+        # --root-owner-group ensures all files are owned by root:root inside the package
+        dpkg-deb --build --root-owner-group "${{ inputs.package-path }}" /tmp/deb-output/
+
+        DEB_FILE=$(ls /tmp/deb-output/*.deb | head -1)
+        echo "deb-file=$(basename $DEB_FILE)" >> $GITHUB_OUTPUT
+        echo "package-name=$(dpkg-deb -f "$DEB_FILE" Package)" >> $GITHUB_OUTPUT
+        echo "package-version=$(dpkg-deb -f "$DEB_FILE" Version)" >> $GITHUB_OUTPUT
+        echo "package-arch=$(dpkg-deb -f "$DEB_FILE" Architecture)" >> $GITHUB_OUTPUT
+
+    - name: Checkout pages repo
+      uses: actions/checkout@v6
+      with:
+        repository: ${{ inputs.pages-repo }}
+        ref: ${{ inputs.pages-branch }}
+        token: ${{ inputs.token }}
+        path: _pages
+
+    - name: Set up APT repository structure
+      shell: bash
+      run: |
+        PKG_ARCH="${{ steps.build.outputs.package-arch }}"
+        DIST="${{ inputs.distribution }}"
+        COMP="${{ inputs.component }}"
+        BASE="_pages/${{ inputs.deb-dir }}"
+
+        POOL_DIR="$BASE/pool/$COMP"
+        BINARY_DIR="$BASE/dists/$DIST/$COMP/binary-$PKG_ARCH"
+
+        mkdir -p "$POOL_DIR" "$BINARY_DIR"
+
+        # Add .deb to pool
+        cp /tmp/deb-output/*.deb "$POOL_DIR/"
+
+        # Generate Packages index from the whole pool
+        cd "$BASE"
+        dpkg-scanpackages --multiversion pool/ \
+          > "dists/$DIST/$COMP/binary-$PKG_ARCH/Packages"
+        gzip -k -f "dists/$DIST/$COMP/binary-$PKG_ARCH/Packages"
+
+        # Generate Release file with checksums
+        cd "dists/$DIST"
+        OWNER=$(echo "${{ inputs.pages-repo }}" | cut -d'/' -f1)
+        REPO=$(echo "${{ inputs.pages-repo }}" | cut -d'/' -f2)
+        {
+          echo "Origin: $OWNER"
+          echo "Label: $REPO"
+          echo "Suite: $DIST"
+          echo "Codename: $DIST"
+          echo "Architectures: $PKG_ARCH"
+          echo "Components: $COMP"
+          echo "Description: $REPO APT Repository"
+          apt-ftparchive release .
+        } > Release
+
+    - name: Sign APT repository with GPG
+      if: inputs.gpg-private-key != ''
+      shell: bash
+      env:
+        GPG_PRIVATE_KEY: ${{ inputs.gpg-private-key }}
+        GPG_PASSPHRASE: ${{ inputs.gpg-passphrase }}
+      run: |
+        echo "$GPG_PRIVATE_KEY" | gpg --batch --yes --import
+
+        RELEASE="_pages/${{ inputs.deb-dir }}/dists/${{ inputs.distribution }}/Release"
+        RELEASE_DIR="$(dirname $RELEASE)"
+
+        # Build gpg args; use passphrase-fd to avoid shell injection
+        sign() {
+          local extra_args="$1"
+          local output="$2"
+          if [ -n "$GPG_PASSPHRASE" ]; then
+            echo "$GPG_PASSPHRASE" | gpg --batch --yes --armor \
+              --pinentry-mode loopback --passphrase-fd 0 \
+              $extra_args -o "$output" "$RELEASE"
+          else
+            gpg --batch --yes --armor $extra_args -o "$output" "$RELEASE"
+          fi
+        }
+
+        sign "--detach-sign" "${RELEASE}.gpg"
+        sign "--clearsign" "${RELEASE_DIR}/InRelease"
+
+        # Export the public key so users can add it to their apt trusted keys
+        gpg --armor --export > "_pages/${{ inputs.deb-dir }}/pubkey.gpg"
+
+    - name: Commit and push
+      shell: bash
+      working-directory: _pages
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        git add "${{ inputs.deb-dir }}/"
+        git diff --staged --quiet && echo "No changes to publish." && exit 0
+
+        PKG="${{ steps.build.outputs.package-name }}"
+        VER="${{ steps.build.outputs.package-version }}"
+        git commit -m "chore: publish ${PKG} ${VER} to apt repo"
+
+        for i in 1 2 3; do
+          git pull --rebase origin ${{ inputs.pages-branch }} && git push && break
+          echo "Push attempt $i failed, retrying in $((i * 5))s..."
+          sleep $((i * 5))
+        done
