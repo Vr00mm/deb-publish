@@ -2,106 +2,193 @@
 
 A GitHub Action that builds a `.deb` package from a staged directory and publishes it to an APT repository hosted on GitHub Pages.
 
+**What it does on every run:**
+
 - Builds the `.deb` using `dpkg-deb`
-- Maintains a versioned pool (all published versions are preserved)
-- Regenerates `Packages`, `Packages.gz`, and `Release` on every publish
-- Optionally signs the repository with GPG (`Release.gpg` + `InRelease`)
-- Exports the public key as `pubkey.gpg` for easy client setup
-- Retries push on concurrent conflicts
+- Copies it into the pool, preserving all previously published versions
+- Regenerates `Packages`, `Packages.gz`, and `Release`
+- Signs `Release.gpg` and `InRelease` with your GPG key (optional but recommended)
+- Exports `pubkey.gpg` so clients can add your key with one command
+- Pushes to your pages repository with automatic retry on concurrent conflicts
 
-## Versioning
+---
 
-The package version is read from the `Version` field in `DEBIAN/control`. Since the control file is static in your repo, you update it at build time — typically from a git tag.
+## Table of contents
 
-### Update version from a git tag
+1. [Prerequisites](#1-prerequisites)
+   - [1.1 GitHub Pages repository](#11-github-pages-repository)
+   - [1.2 Enable GitHub Pages](#12-enable-github-pages)
+   - [1.3 Create a Personal Access Token](#13-create-a-personal-access-token)
+   - [1.4 Generate a GPG signing key](#14-generate-a-gpg-signing-key)
+   - [1.5 Add secrets to your source repository](#15-add-secrets-to-your-source-repository)
+2. [Package structure](#2-package-structure)
+3. [Usage](#3-usage)
+   - [Minimal example](#minimal-example)
+   - [Full release workflow](#full-release-workflow)
+4. [Versioning](#4-versioning)
+5. [Client setup](#5-client-setup)
+6. [Inputs](#inputs)
+7. [Outputs](#outputs)
 
-```yaml
-on:
-  push:
-    tags:
-      - 'v*'
+---
 
-jobs:
-  release:
-    steps:
-      - uses: actions/checkout@v6
+## 1. Prerequisites
 
-      - name: Set package version from tag
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}   # strips the leading v: v1.2.3 → 1.2.3
-          sed -i "s/^Version:.*/Version: $VERSION/" package/DEBIAN/control
+### 1.1 GitHub Pages repository
 
-      - uses: Vr00mm/deb-publish@v1
-        with:
-          package-path: ./package
-          ...
-```
+You need a GitHub repository with Pages enabled to store the APT repository files.
+The most common choice is your **user/org pages repo** (`owner/owner.github.io`), but any repository works.
 
-Every published `.deb` is kept in the pool — users can install a specific version:
+**Option A — Use your existing `owner.github.io` repo**
+
+If you already have `https://github.com/owner/owner.github.io`, skip to [1.2](#12-enable-github-pages).
+The APT repository will live at `https://owner.github.io/deb/` by default.
+
+**Option B — Create a dedicated repository**
+
+1. Go to <https://github.com/new>
+2. Name it `owner.github.io` (replaces your current user pages) **or** any other name (e.g. `apt`)
+3. Set visibility to **Public** (required for free GitHub Pages)
+4. Initialize with a README so the default branch exists
+5. Click **Create repository**
+
+> If you use a non-`owner.github.io` repo, the Pages URL will be
+> `https://owner.github.io/repo-name` — set `pages-url` accordingly.
+
+---
+
+### 1.2 Enable GitHub Pages
+
+1. Open the pages repository on GitHub
+2. Go to **Settings → Pages**
+3. Under **Build and deployment**, set **Source** to **Deploy from a branch**
+4. Select the branch (`master` or `main`) and folder **/ (root)**
+5. Click **Save**
+
+GitHub will show the published URL (e.g. `https://owner.github.io`). It may take a minute for the first deployment.
+
+---
+
+### 1.3 Create a Personal Access Token
+
+The action needs to push commits to your pages repository.
+Create a **fine-grained personal access token** scoped only to that repo.
+
+1. Go to <https://github.com/settings/personal-access-tokens/new>
+2. Fill in:
+   - **Token name**: `deb-publish` (or any name you like)
+   - **Expiration**: choose a duration (1 year is a common balance)
+   - **Resource owner**: your account or org
+3. Under **Repository access**, select **Only select repositories** and pick your pages repo
+4. Under **Permissions → Repository permissions**, set **Contents** to **Read and write**
+5. Leave everything else as **No access**
+6. Click **Generate token** and copy the value immediately — it will not be shown again
+
+Keep this token; you will add it as a secret in [1.5](#15-add-secrets-to-your-source-repository).
+
+---
+
+### 1.4 Generate a GPG signing key
+
+Signing is optional but strongly recommended. Without it, clients must use `trusted=yes` which suppresses authentication warnings.
+
+#### Generate the key
+
+Run the following on your local machine (Linux/macOS) or in WSL:
+
 ```bash
-sudo apt install my-package=1.2.3
+gpg --batch --gen-key <<EOF
+Key-Type: RSA
+Key-Length: 4096
+Name-Real: Your Name
+Name-Email: you@example.com
+Expire-Date: 0
+%no-passphrase
+%commit
+EOF
 ```
 
-To list available versions:
+To add a passphrase (more secure), replace `%no-passphrase` with:
+
+```
+Passphrase: your-passphrase-here
+```
+
+#### Find the key ID
+
 ```bash
-apt-cache showpkg my-package
+gpg --list-secret-keys --keyid-format LONG you@example.com
 ```
 
-## Usage
+Output example:
 
-```yaml
-- uses: Vr00mm/deb-publish@v1
-  with:
-    package-path: ./package
-    token: ${{ secrets.PAGES_TOKEN }}
-    pages-repo: Vr00mm/vr00mm.github.io
-    pages-url: https://vr00mm.github.io
-    gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+```
+sec   rsa4096/AABBCCDD11223344 2024-01-01 [SC]
+      FINGERPRINT...
+uid           [ultimate] Your Name <you@example.com>
 ```
 
-## Inputs
+The key ID is the part after `rsa4096/`: `AABBCCDD11223344`.
 
-| Input | Required | Default | Description |
-|---|---|---|---|
-| `package-path` | yes | | Path to the package staging directory (see [Package structure](#package-structure)) |
-| `token` | yes | | GitHub token with `contents: write` on the pages repository |
-| `pages-repo` | yes | | Repository hosting the APT repo (`owner/repo`) |
-| `pages-url` | yes | | Base URL of the GitHub Pages site (e.g. `https://owner.github.io`) |
-| `pages-branch` | no | `master` | Branch of the pages repository |
-| `deb-dir` | no | `deb` | Subdirectory in the pages repo for the APT repository |
-| `distribution` | no | `stable` | APT distribution name (e.g. `stable`, `focal`, `jammy`) |
-| `component` | no | `main` | APT component (e.g. `main`, `contrib`) |
-| `gpg-private-key` | no | | ASCII-armored GPG private key for signing. Leave empty to skip signing. |
-| `gpg-passphrase` | no | | Passphrase for the GPG key. Leave empty if the key has none. |
+#### Export the private key
 
-## Outputs
+This is the value you will store as the `GPG_PRIVATE_KEY` secret:
 
-| Output | Description |
+```bash
+gpg --armor --export-secret-keys AABBCCDD11223344
+```
+
+Copy the entire output including the `-----BEGIN PGP PRIVATE KEY BLOCK-----` header and footer.
+
+#### Export the public key (optional pre-commit)
+
+The action automatically exports and pushes `pubkey.gpg` on every run.
+You can also export it manually to commit it to your pages repo in advance:
+
+```bash
+gpg --armor --export AABBCCDD11223344 > pubkey.gpg
+```
+
+---
+
+### 1.5 Add secrets to your source repository
+
+Open the repository that **contains your source code and workflow** (not the pages repo).
+
+Go to **Settings → Secrets and variables → Actions → New repository secret** and add:
+
+| Secret name | Value |
 |---|---|
-| `deb-file` | Filename of the built `.deb` package |
-| `package-name` | Package name from `DEBIAN/control` |
-| `package-version` | Package version from `DEBIAN/control` |
-| `package-arch` | Package architecture from `DEBIAN/control` |
+| `PAGES_TOKEN` | The fine-grained PAT from [1.3](#13-create-a-personal-access-token) |
+| `GPG_PRIVATE_KEY` | The full ASCII-armored private key from [1.4](#14-generate-a-gpg-signing-key) |
+| `GPG_PASSPHRASE` | The passphrase you set, or leave empty if you used `%no-passphrase` |
 
-## Package structure
+> `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` are only required if you want signed releases.
+> You can skip them and omit those inputs from the workflow — the action will still publish but without signing.
 
-The `package-path` directory must follow the standard Debian staging layout — files placed where they should be installed on the target system:
+---
+
+## 2. Package structure
+
+The `package-path` directory must follow the standard Debian staging layout.
+Files are placed at the path where they should be installed on the target system.
 
 ```
 package/
-  DEBIAN/
-    control       ← required: package metadata
-    postinst      ← optional: script run after install
-    prerm         ← optional: script run before removal
-  usr/
-    bin/
-      my-binary   ← installs to /usr/bin/my-binary
-  etc/
-    my-app.conf   ← installs to /etc/my-app.conf
-  lib/
-    systemd/
-      system/
-        my-app.service  ← installs to /lib/systemd/system/my-app.service
+├── DEBIAN/
+│   ├── control       ← required: package metadata
+│   ├── postinst      ← optional: script run after install
+│   ├── prerm         ← optional: script run before removal
+│   └── conffiles     ← optional: list of config files (not replaced on upgrade)
+├── usr/
+│   └── bin/
+│       └── my-binary         → installs to /usr/bin/my-binary
+├── etc/
+│   └── my-app.conf           → installs to /etc/my-app.conf
+└── lib/
+    └── systemd/
+        └── system/
+            └── my-app.service  → installs to /lib/systemd/system/my-app.service
 ```
 
 ### DEBIAN/control (minimal)
@@ -111,90 +198,64 @@ Package: my-app
 Version: 1.0.0
 Architecture: amd64
 Maintainer: Your Name <you@example.com>
-Description: Short description
- Longer description on continuation lines (leading space required).
-Depends: systemd
+Description: Short one-line description
+ Optional longer description.
+ Each continuation line must start with a space.
+Depends: libc6 (>= 2.17), systemd
 ```
 
-## Prerequisites
+**Required fields:** `Package`, `Version`, `Architecture`, `Maintainer`, `Description`
 
-### 1. GitHub Pages repository
+**Common optional fields:**
 
-You need a repository with GitHub Pages enabled.
+| Field | Example |
+|---|---|
+| `Depends` | `libc6 (>= 2.17), systemd` |
+| `Recommends` | `curl` |
+| `Conflicts` | `my-app-legacy` |
+| `Replaces` | `my-app-legacy` |
+| `Homepage` | `https://github.com/owner/my-app` |
+| `Section` | `utils` |
+| `Priority` | `optional` |
 
-### 2. PAGES_TOKEN secret
+### Maintainer scripts
 
-Create a **fine-grained personal access token** at https://github.com/settings/personal-access-tokens/new:
-
-- **Repository access:** your pages repo only
-- **Permissions:** `Contents` → Read and write
-
-Add it as a secret named `PAGES_TOKEN`.
-
-### 3. GPG key (recommended)
-
-Generate a signing key:
+Scripts (`postinst`, `prerm`, `postrm`, `preinst`) must be executable:
 
 ```bash
-gpg --batch --gen-key <<EOF
-Key-Type: RSA
-Key-Length: 4096
-Name-Real: Your Name
-Name-Email: you@example.com
-%no-passphrase
-%commit
-EOF
-
-# Export private key → paste into GPG_PRIVATE_KEY secret
-gpg --armor --export-secret-keys you@example.com
-
-# Export public key → commit to your pages repo as pubkey.gpg
-gpg --armor --export you@example.com > pubkey.gpg
+chmod 755 package/DEBIAN/postinst package/DEBIAN/prerm
 ```
 
-Without GPG signing the action still works but clients must use `trusted=yes`.
-
-## Client setup
-
-### With GPG signing (recommended)
+Example `postinst` to enable a systemd service:
 
 ```bash
-curl -fsSL https://owner.github.io/pubkey.gpg \
-  | sudo gpg --dearmor -o /usr/share/keyrings/owner.gpg
-
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/owner.gpg] https://owner.github.io/deb stable main" \
-  | sudo tee /etc/apt/sources.list.d/owner.list
-
-sudo apt update
-sudo apt install my-package
+#!/bin/bash
+set -e
+systemctl daemon-reload
+systemctl enable --now my-app.service
 ```
 
-### Without GPG signing
+---
 
-```bash
-echo "deb [arch=amd64 trusted=yes] https://owner.github.io/deb stable main" \
-  | sudo tee /etc/apt/sources.list.d/owner.list
+## 3. Usage
 
-sudo apt update
-sudo apt install my-package
-```
-
-## Examples
-
-### Basic
+### Minimal example
 
 ```yaml
 - uses: Vr00mm/deb-publish@v1
   with:
     package-path: ./package
     token: ${{ secrets.PAGES_TOKEN }}
-    pages-repo: Vr00mm/vr00mm.github.io
-    pages-url: https://vr00mm.github.io
+    pages-repo: owner/owner.github.io
+    pages-url: https://owner.github.io
     gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
     gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
 ```
 
-### Full release workflow example
+### Full release workflow
+
+This workflow triggers on a version tag (`v1.2.3`), builds a Go binary,
+stamps the version into `DEBIAN/control`, and publishes the package.
 
 ```yaml
 name: Release
@@ -207,27 +268,184 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to create a GitHub Release
+
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
 
       - name: Build binary
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o package/usr/bin/my-app ./cmd/my-app
-        working-directory: src
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -o package/usr/bin/my-app ./cmd/my-app
 
-      - name: Set package version
+      - name: Stamp version into control file
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${GITHUB_REF_NAME#v}   # strips leading 'v': v1.2.3 → 1.2.3
           sed -i "s/^Version:.*/Version: $VERSION/" package/DEBIAN/control
           chmod 755 package/DEBIAN/postinst package/DEBIAN/prerm
 
-      - name: Publish deb package
+      - name: Publish .deb to APT repository
         uses: Vr00mm/deb-publish@v1
         with:
           package-path: ./package
           token: ${{ secrets.PAGES_TOKEN }}
-          pages-repo: Vr00mm/vr00mm.github.io
-          pages-url: https://vr00mm.github.io
+          pages-repo: owner/owner.github.io
+          pages-url: https://owner.github.io
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+```
+
+### Publishing to a subdirectory of the pages repo
+
+If your pages repo is not `owner.github.io` but e.g. `owner/apt`:
+
+```yaml
+- uses: Vr00mm/deb-publish@v1
+  with:
+    package-path: ./package
+    token: ${{ secrets.PAGES_TOKEN }}
+    pages-repo: owner/apt
+    pages-url: https://owner.github.io/apt   # note the /repo-name suffix
+    pages-branch: main
+    gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+    gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
+```
+
+### Multiple distributions
+
+Run the action twice with different `distribution` values:
+
+```yaml
+- uses: Vr00mm/deb-publish@v1
+  with:
+    package-path: ./package
+    distribution: jammy
+    token: ${{ secrets.PAGES_TOKEN }}
+    pages-repo: owner/owner.github.io
+    pages-url: https://owner.github.io
+    gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+    gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+- uses: Vr00mm/deb-publish@v1
+  with:
+    package-path: ./package
+    distribution: noble
+    token: ${{ secrets.PAGES_TOKEN }}
+    pages-repo: owner/owner.github.io
+    pages-url: https://owner.github.io
+    gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+    gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
+```
+
+---
+
+## 4. Versioning
+
+The package version is read from the `Version` field in `DEBIAN/control`.
+The recommended pattern is to keep a placeholder in the file and overwrite it at build time from the git tag:
+
+```bash
+VERSION=${GITHUB_REF_NAME#v}   # v1.2.3 → 1.2.3
+sed -i "s/^Version:.*/Version: $VERSION/" package/DEBIAN/control
+```
+
+Every published `.deb` is kept in the pool — older versions are never deleted.
+Clients can install a specific version:
+
+```bash
+sudo apt install my-package=1.2.3
+```
+
+To list all available versions:
+
+```bash
+apt-cache showpkg my-package
+```
+
+---
+
+## 5. Client setup
+
+### With GPG signing (recommended)
+
+Replace `owner` with your GitHub username/org and `my-package` with your package name.
+
+```bash
+# 1. Download and install the repository signing key
+curl -fsSL https://owner.github.io/deb/pubkey.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/owner.gpg
+
+# 2. Add the APT source
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/owner.gpg] \
+  https://owner.github.io/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/owner.list
+
+# 3. Update and install
+sudo apt update
+sudo apt install my-package
+```
+
+> If you used a custom `deb-dir`, replace `deb` in the URL and source line with your value.
+> If you used a custom `distribution` or `component`, update those in the source line too.
+
+### Without GPG signing
+
+```bash
+echo "deb [arch=amd64 trusted=yes] https://owner.github.io/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/owner.list
+
+sudo apt update
+sudo apt install my-package
+```
+
+> `trusted=yes` tells apt to skip signature verification. This is fine for internal or personal use,
+> but not recommended for packages distributed publicly.
+
+---
+
+## Inputs
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `package-path` | yes | | Path to the package staging directory (see [Package structure](#2-package-structure)) |
+| `token` | yes | | Fine-grained PAT with `Contents: Read and write` on the pages repository |
+| `pages-repo` | yes | | Repository hosting the APT repo (`owner/repo`) |
+| `pages-url` | yes | | Base URL of the GitHub Pages site (`https://owner.github.io` or `https://owner.github.io/repo`) |
+| `pages-branch` | no | `master` | Branch of the pages repository |
+| `deb-dir` | no | `deb` | Subdirectory inside the pages repo that holds the APT repository files |
+| `distribution` | no | `stable` | APT distribution name (e.g. `stable`, `focal`, `jammy`, `noble`) |
+| `component` | no | `main` | APT component (e.g. `main`, `contrib`, `non-free`) |
+| `gpg-private-key` | no | | ASCII-armored GPG private key. Leave empty to publish without signing. |
+| `gpg-passphrase` | no | | Passphrase for the GPG key. Leave empty if the key was generated with `%no-passphrase`. |
+
+## Outputs
+
+| Output | Description |
+|---|---|
+| `deb-file` | Filename of the built `.deb` (e.g. `my-app_1.2.3_amd64.deb`) |
+| `package-name` | `Package` field from `DEBIAN/control` |
+| `package-version` | `Version` field from `DEBIAN/control` |
+| `package-arch` | `Architecture` field from `DEBIAN/control` |
+
+Use outputs in subsequent steps:
+
+```yaml
+- uses: Vr00mm/deb-publish@v1
+  id: publish
+  with:
+    ...
+
+- run: echo "Published ${{ steps.publish.outputs.deb-file }}"
 ```

@@ -1,0 +1,29 @@
+name: Example — publish hello-world .deb
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Stamp version into control file
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^Version:.*/Version: $VERSION/" example/package/DEBIAN/control
+
+      - name: Publish .deb to APT repository
+        uses: ./
+        with:
+          package-path: ./example/package
+          token: ${{ secrets.PAGES_TOKEN }}
+          pages-repo: Vr00mm/vr00mm.github.io
+          pages-url: https://vr00mm.github.io
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
