@@ -1,11 +1,10 @@
 # deb-publish
 
-A GitHub Action that builds a `.deb` package from a staged directory and publishes it to an APT repository hosted on GitHub Pages.
+A GitHub Action that publishes a pre-built `.deb` package to an APT repository hosted on GitHub Pages.
 
 **What it does on every run:**
 
-- Builds the `.deb` using `dpkg-deb`
-- Copies it into the pool, preserving all previously published versions
+- Copies the provided `.deb` into the pool, preserving all previously published versions
 - Regenerates `Packages`, `Packages.gz`, and `Release`
 - Signs `Release.gpg` and `InRelease` with your GPG key (optional but recommended)
 - Exports `pubkey.gpg` so clients can add your key with one command
@@ -21,14 +20,13 @@ A GitHub Action that builds a `.deb` package from a staged directory and publish
    - [1.3 Create a Personal Access Token](#13-create-a-personal-access-token)
    - [1.4 Generate a GPG signing key](#14-generate-a-gpg-signing-key)
    - [1.5 Add secrets to your source repository](#15-add-secrets-to-your-source-repository)
-2. [Package structure](#2-package-structure)
-3. [Usage](#3-usage)
+2. [Usage](#2-usage)
    - [Minimal example](#minimal-example)
    - [Full release workflow](#full-release-workflow)
-4. [Versioning](#4-versioning)
-5. [Client setup](#5-client-setup)
-6. [Inputs](#inputs)
-7. [Outputs](#outputs)
+3. [Versioning](#3-versioning)
+4. [Client setup](#4-client-setup)
+5. [Inputs](#inputs)
+6. [Outputs](#outputs)
 
 ---
 
@@ -42,7 +40,7 @@ The most common choice is your **user/org pages repo** (`owner/owner.github.io`)
 **Option A — Use your existing `owner.github.io` repo**
 
 If you already have `https://github.com/owner/owner.github.io`, skip to [1.2](#12-enable-github-pages).
-The APT repository will live at `https://owner.github.io/deb/` by default.
+The APT repository will live at `https://owner.github.io/apt/` by default.
 
 **Option B — Create a dedicated repository**
 
@@ -168,83 +166,15 @@ Go to **Settings → Secrets and variables → Actions → New repository secret
 
 ---
 
-## 2. Package structure
-
-The `package-path` directory must follow the standard Debian staging layout.
-Files are placed at the path where they should be installed on the target system.
-
-```
-package/
-├── DEBIAN/
-│   ├── control       ← required: package metadata
-│   ├── postinst      ← optional: script run after install
-│   ├── prerm         ← optional: script run before removal
-│   └── conffiles     ← optional: list of config files (not replaced on upgrade)
-├── usr/
-│   └── bin/
-│       └── my-binary         → installs to /usr/bin/my-binary
-├── etc/
-│   └── my-app.conf           → installs to /etc/my-app.conf
-└── lib/
-    └── systemd/
-        └── system/
-            └── my-app.service  → installs to /lib/systemd/system/my-app.service
-```
-
-### DEBIAN/control (minimal)
-
-```
-Package: my-app
-Version: 1.0.0
-Architecture: amd64
-Maintainer: Your Name <you@example.com>
-Description: Short one-line description
- Optional longer description.
- Each continuation line must start with a space.
-Depends: libc6 (>= 2.17), systemd
-```
-
-**Required fields:** `Package`, `Version`, `Architecture`, `Maintainer`, `Description`
-
-**Common optional fields:**
-
-| Field | Example |
-|---|---|
-| `Depends` | `libc6 (>= 2.17), systemd` |
-| `Recommends` | `curl` |
-| `Conflicts` | `my-app-legacy` |
-| `Replaces` | `my-app-legacy` |
-| `Homepage` | `https://github.com/owner/my-app` |
-| `Section` | `utils` |
-| `Priority` | `optional` |
-
-### Maintainer scripts
-
-Scripts (`postinst`, `prerm`, `postrm`, `preinst`) must be executable:
-
-```bash
-chmod 755 package/DEBIAN/postinst package/DEBIAN/prerm
-```
-
-Example `postinst` to enable a systemd service:
-
-```bash
-#!/bin/bash
-set -e
-systemctl daemon-reload
-systemctl enable --now my-app.service
-```
-
----
-
-## 3. Usage
+## 2. Usage
 
 ### Minimal example
 
 ```yaml
-- uses: Vr00mm/deb-publish@v1
+- name: Publish .deb to APT repository
+  uses: Vr00mm/deb-publish@v1
   with:
-    package-path: ./package
+    deb-path: ./dist/my-app_1.2.3_amd64.deb
     token: ${{ secrets.PAGES_TOKEN }}
     pages-repo: owner/owner.github.io
     pages-url: https://owner.github.io
@@ -255,7 +185,7 @@ systemctl enable --now my-app.service
 ### Full release workflow
 
 This workflow triggers on a version tag (`v1.2.3`), builds a Go binary,
-stamps the version into `DEBIAN/control`, and publishes the package.
+packages it into a `.deb`, then publishes it.
 
 ```yaml
 name: Release
@@ -291,10 +221,17 @@ jobs:
           sed -i "s/^Version:.*/Version: $VERSION/" package/DEBIAN/control
           chmod 755 package/DEBIAN/postinst package/DEBIAN/prerm
 
+      - name: Build .deb package
+        id: build
+        run: |
+          dpkg-deb --build --root-owner-group package /tmp/
+          DEB_FILE=$(ls /tmp/*.deb | head -1)
+          echo "deb-path=$DEB_FILE" >> $GITHUB_OUTPUT
+
       - name: Publish .deb to APT repository
         uses: Vr00mm/deb-publish@v1
         with:
-          package-path: ./package
+          deb-path: ${{ steps.build.outputs.deb-path }}
           token: ${{ secrets.PAGES_TOKEN }}
           pages-repo: owner/owner.github.io
           pages-url: https://owner.github.io
@@ -314,7 +251,7 @@ If your pages repo is not `owner.github.io` but e.g. `owner/apt`:
 ```yaml
 - uses: Vr00mm/deb-publish@v1
   with:
-    package-path: ./package
+    deb-path: ${{ steps.build.outputs.deb-path }}
     token: ${{ secrets.PAGES_TOKEN }}
     pages-repo: owner/apt
     pages-url: https://owner.github.io/apt   # note the /repo-name suffix
@@ -330,7 +267,7 @@ Run the action twice with different `distribution` values:
 ```yaml
 - uses: Vr00mm/deb-publish@v1
   with:
-    package-path: ./package
+    deb-path: ${{ steps.build.outputs.deb-path }}
     distribution: jammy
     token: ${{ secrets.PAGES_TOKEN }}
     pages-repo: owner/owner.github.io
@@ -340,7 +277,7 @@ Run the action twice with different `distribution` values:
 
 - uses: Vr00mm/deb-publish@v1
   with:
-    package-path: ./package
+    deb-path: ${{ steps.build.outputs.deb-path }}
     distribution: noble
     token: ${{ secrets.PAGES_TOKEN }}
     pages-repo: owner/owner.github.io
@@ -351,7 +288,7 @@ Run the action twice with different `distribution` values:
 
 ---
 
-## 4. Versioning
+## 3. Versioning
 
 The package version is read from the `Version` field in `DEBIAN/control`.
 The recommended pattern is to keep a placeholder in the file and overwrite it at build time from the git tag:
@@ -376,7 +313,7 @@ apt-cache showpkg my-package
 
 ---
 
-## 5. Client setup
+## 4. Client setup
 
 ### With GPG signing (recommended)
 
@@ -384,12 +321,12 @@ Replace `owner` with your GitHub username/org and `my-package` with your package
 
 ```bash
 # 1. Download and install the repository signing key
-curl -fsSL https://owner.github.io/deb/pubkey.gpg \
+curl -fsSL https://owner.github.io/apt/pubkey.gpg \
   | sudo gpg --dearmor -o /usr/share/keyrings/owner.gpg
 
 # 2. Add the APT source
 echo "deb [arch=amd64 signed-by=/usr/share/keyrings/owner.gpg] \
-  https://owner.github.io/deb stable main" \
+  https://owner.github.io/apt stable main" \
   | sudo tee /etc/apt/sources.list.d/owner.list
 
 # 3. Update and install
@@ -403,7 +340,7 @@ sudo apt install my-package
 ### Without GPG signing
 
 ```bash
-echo "deb [arch=amd64 trusted=yes] https://owner.github.io/deb stable main" \
+echo "deb [arch=amd64 trusted=yes] https://owner.github.io/apt stable main" \
   | sudo tee /etc/apt/sources.list.d/owner.list
 
 sudo apt update
@@ -419,12 +356,12 @@ sudo apt install my-package
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `package-path` | yes | | Path to the package staging directory (see [Package structure](#2-package-structure)) |
+| `deb-path` | yes | | Path to the pre-built `.deb` file to publish. |
 | `token` | yes | | Fine-grained PAT with `Contents: Read and write` on the pages repository |
 | `pages-repo` | yes | | Repository hosting the APT repo (`owner/repo`) |
 | `pages-url` | yes | | Base URL of the GitHub Pages site (`https://owner.github.io` or `https://owner.github.io/repo`) |
 | `pages-branch` | no | `master` | Branch of the pages repository |
-| `deb-dir` | no | `deb` | Subdirectory inside the pages repo that holds the APT repository files |
+| `deb-dir` | no | `apt` | Subdirectory inside the pages repo that holds the APT repository files |
 | `distribution` | no | `stable` | APT distribution name (e.g. `stable`, `focal`, `jammy`, `noble`) |
 | `component` | no | `main` | APT component (e.g. `main`, `contrib`, `non-free`) |
 | `gpg-private-key` | no | | ASCII-armored GPG private key. Leave empty to publish without signing. |
@@ -434,17 +371,19 @@ sudo apt install my-package
 
 | Output | Description |
 |---|---|
-| `deb-file` | Filename of the built `.deb` (e.g. `my-app_1.2.3_amd64.deb`) |
-| `package-name` | `Package` field from `DEBIAN/control` |
-| `package-version` | `Version` field from `DEBIAN/control` |
-| `package-arch` | `Architecture` field from `DEBIAN/control` |
+| `deb-file` | Filename of the published `.deb` (e.g. `my-app_1.2.3_amd64.deb`) |
+| `package-name` | `Package` field read from the `.deb` metadata |
+| `package-version` | `Version` field read from the `.deb` metadata |
+| `package-arch` | `Architecture` field read from the `.deb` metadata |
 
 Use outputs in subsequent steps:
 
 ```yaml
-- uses: Vr00mm/deb-publish@v1
+- name: Publish .deb to APT repository
   id: publish
+  uses: Vr00mm/deb-publish@v1
   with:
+    deb-path: ${{ steps.build.outputs.deb-path }}
     ...
 
 - run: echo "Published ${{ steps.publish.outputs.deb-file }}"
