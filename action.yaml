@@ -5,11 +5,8 @@ branding:
   color: 'orange'
 
 inputs:
-  package-path:
-    description: |
-      Path to the package staging directory.
-      Must contain a DEBIAN/control file and the target files in their
-      install-time filesystem layout (e.g. usr/bin/my-tool, etc/my-app.conf).
+  deb-path:
+    description: 'Path to the pre-built .deb file to publish.'
     required: true
   token:
     description: 'GitHub token with write access to the pages repository'
@@ -24,7 +21,7 @@ inputs:
   deb-dir:
     description: 'Subdirectory in the pages repo for the APT repository'
     required: false
-    default: 'deb'
+    default: 'apt'
   distribution:
     description: 'APT distribution name (e.g. stable, focal, jammy)'
     required: false
@@ -53,17 +50,17 @@ inputs:
 
 outputs:
   deb-file:
-    description: 'Filename of the built .deb package'
-    value: ${{ steps.build.outputs.deb-file }}
+    description: 'Filename of the published .deb package'
+    value: ${{ steps.stage.outputs.deb-file }}
   package-name:
-    description: 'Package name read from DEBIAN/control'
-    value: ${{ steps.build.outputs.package-name }}
+    description: 'Package name read from the .deb metadata'
+    value: ${{ steps.stage.outputs.package-name }}
   package-version:
-    description: 'Package version read from DEBIAN/control'
-    value: ${{ steps.build.outputs.package-version }}
+    description: 'Package version read from the .deb metadata'
+    value: ${{ steps.stage.outputs.package-version }}
   package-arch:
-    description: 'Package architecture read from DEBIAN/control'
-    value: ${{ steps.build.outputs.package-arch }}
+    description: 'Package architecture read from the .deb metadata'
+    value: ${{ steps.stage.outputs.package-arch }}
 
 runs:
   using: composite
@@ -74,16 +71,14 @@ runs:
         sudo apt-get update -q
         sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils
 
-    - name: Build .deb package
-      id: build
+    - name: Stage .deb package
+      id: stage
       shell: bash
       env:
-        PACKAGE_PATH: ${{ inputs.package-path }}
+        DEB_PATH: ${{ inputs.deb-path }}
       run: |
         mkdir -p /tmp/deb-output
-
-        # --root-owner-group ensures all files are owned by root:root inside the package
-        dpkg-deb --build --root-owner-group "$PACKAGE_PATH" /tmp/deb-output/
+        cp "$DEB_PATH" /tmp/deb-output/
 
         DEB_FILE=$(ls /tmp/deb-output/*.deb | head -1)
         echo "deb-file=$(basename "$DEB_FILE")" >> $GITHUB_OUTPUT
@@ -102,7 +97,7 @@ runs:
     - name: Set up APT repository structure
       shell: bash
       env:
-        PKG_ARCH: ${{ steps.build.outputs.package-arch }}
+        PKG_ARCH: ${{ steps.stage.outputs.package-arch }}
         DIST: ${{ inputs.distribution }}
         COMP: ${{ inputs.component }}
         DEB_DIR: ${{ inputs.deb-dir }}
@@ -177,8 +172,8 @@ runs:
       working-directory: _pages
       env:
         DEB_DIR: ${{ inputs.deb-dir }}
-        PACKAGE_NAME: ${{ steps.build.outputs.package-name }}
-        PACKAGE_VERSION: ${{ steps.build.outputs.package-version }}
+        PACKAGE_NAME: ${{ steps.stage.outputs.package-name }}
+        PACKAGE_VERSION: ${{ steps.stage.outputs.package-version }}
         PAGES_BRANCH: ${{ inputs.pages-branch }}
       run: |
         git config user.name "github-actions[bot]"
