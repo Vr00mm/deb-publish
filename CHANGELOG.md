@@ -7,6 +7,56 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-04-16
+
+### 🎯 Major Architectural Change
+
+Complete redesign to fix race conditions and GPG inconsistency issues through a **dual-mode dispatch architecture**.
+
+### Added
+- **Dispatch mode**: For app repos - uploads artifact and triggers pages repo
+- **Publish mode**: For pages repo - receives dispatch and publishes package
+- `mode` input for explicit mode selection (auto-detects if not specified)
+- Sequential processing with `concurrency` group to prevent race conditions
+- Artifact-based package transfer (1-day retention)
+- Example workflows for both app and pages repos
+- `ARCHITECTURE.md` documenting the complete solution
+- New outputs: `mode`, `dispatched`
+
+### Changed
+- **BREAKING**: Action now requires two-step setup:
+  1. Pages repo: workflow with `mode: publish`
+  2. App repos: workflow with `mode: dispatch`
+- **BREAKING**: Removed `pages-url` input (no longer needed)
+- **BREAKING**: GPG secrets now stored only in pages repo (not app repos)
+- Token requirement: `PAGES_REPO_TOKEN` only needs dispatch permission
+- All inputs now optional with sensible defaults (except mode-specific required inputs)
+- Repository checkout only happens in publish mode
+- Improved error messages and validation
+
+### Fixed
+- **Race conditions**: Sequential queue prevents concurrent metadata corruption
+- **GPG inconsistency**: Single centralized signing key eliminates state conflicts
+- **Concurrency safety**: Eliminated retry loops and last-writer-wins scenarios
+- **Security**: Reduced secret sprawl by centralizing GPG keys
+
+### Removed
+- **BREAKING**: Direct pages repo modification from app repos
+- **BREAKING**: `pages-url` input (not needed with dispatch architecture)
+- Retry logic (no longer needed - concurrency prevents conflicts)
+
+### Migration Guide
+
+See README section "Migration from v1" for complete migration steps.
+
+**Quick summary:**
+1. Add publish workflow to pages repo
+2. Update app workflows to use dispatch mode
+3. Move GPG secrets from app repos to pages repo
+4. Remove `pages-url` from app workflows
+
+---
+
 ## [1.1.0] - 2026-04-15
 
 ### Changed
