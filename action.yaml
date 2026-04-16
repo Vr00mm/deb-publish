@@ -1,154 +1,313 @@
 name: 'Debian Package Publisher for GitHub Pages'
-description: 'Build and publish a .deb package to an APT repository hosted on GitHub Pages.'
+description: 'Unified action for dispatching and publishing .deb packages to APT repositories on GitHub Pages.'
 branding:
   icon: 'archive'
   color: 'orange'
 
 inputs:
+  mode:
+    description: |
+      Action mode: 'dispatch' or 'publish'.
+      - dispatch: From app repos - triggers pages repo to publish (requires: deb-path, token, pages-repo)
+      - publish: From pages repo - receives and publishes package (requires: gpg-private-key if signing)
+      Leave empty for auto-detection based on github.event_name.
+    required: false
+    default: ''
+  
+  # ============ Dispatch Mode Inputs (app repos) ============
   deb-path:
-    description: 'Path to the pre-built .deb file to publish.'
-    required: true
+    description: '[dispatch mode] Path to the .deb file to publish.'
+    required: false
   token:
-    description: 'GitHub token with write access to the pages repository'
-    required: true
+    description: '[dispatch mode] GitHub token with repository_dispatch permission on pages-repo.'
+    required: false
   pages-repo:
-    description: 'Repository hosting the APT repo (owner/repo), e.g. Vr00mm/vr00mm.github.io'
-    required: true
+    description: '[dispatch mode] Pages repository (owner/repo), e.g. myorg/myorg.github.io'
+    required: false
+  
+  # ============ Shared Configuration Inputs ============
   pages-branch:
-    description: 'Branch of the pages repository'
+    description: 'Branch of the pages repository (default: master).'
     required: false
     default: 'master'
   deb-dir:
-    description: 'Subdirectory in the pages repo for the APT repository'
+    description: 'Subdirectory in pages repo for APT repository (default: apt).'
     required: false
     default: 'apt'
   distribution:
-    description: 'APT distribution name (e.g. stable, focal, jammy)'
+    description: 'APT distribution name (e.g. stable, focal, jammy).'
     required: false
     default: 'stable'
   component:
-    description: 'APT component (e.g. main, contrib)'
+    description: 'APT component (e.g. main, contrib).'
     required: false
     default: 'main'
-  pages-url:
-    description: |
-      Base URL of the GitHub Pages site.
-      For a user/org pages repo (owner.github.io): https://owner.github.io
-      For a project repo: https://owner.github.io/repo-name
-    required: true
+  
+  # ============ Publish Mode Inputs (pages repo) ============
   gpg-private-key:
     description: |
-      ASCII-armored GPG private key for signing the repository.
-      Leave empty to publish without signing (not recommended for production).
-      Export your key with: gpg --armor --export-secret-keys KEY_ID
+      [publish mode] ASCII-armored GPG private key for signing.
+      Leave empty to publish unsigned (not recommended).
+      Export: gpg --armor --export-secret-keys KEY_ID
     required: false
     default: ''
   gpg-passphrase:
-    description: 'Passphrase for the GPG private key. Leave empty if the key has none.'
+    description: '[publish mode] Passphrase for the GPG private key.'
     required: false
     default: ''
 
 outputs:
-  deb-file:
-    description: 'Filename of the published .deb package'
-    value: ${{ steps.stage.outputs.deb-file }}
+  mode:
+    description: 'Mode used: dispatch or publish'
+    value: ${{ steps.detect-mode.outputs.mode }}
   package-name:
-    description: 'Package name read from the .deb metadata'
-    value: ${{ steps.stage.outputs.package-name }}
+    description: 'Package name'
+    value: ${{ steps.metadata.outputs.package-name }}
   package-version:
-    description: 'Package version read from the .deb metadata'
-    value: ${{ steps.stage.outputs.package-version }}
+    description: 'Package version'
+    value: ${{ steps.metadata.outputs.package-version }}
   package-arch:
-    description: 'Package architecture read from the .deb metadata'
-    value: ${{ steps.stage.outputs.package-arch }}
+    description: 'Package architecture'
+    value: ${{ steps.metadata.outputs.package-arch }}
+  dispatched:
+    description: '[dispatch mode] Whether dispatch was sent successfully'
+    value: ${{ steps.dispatch.outputs.dispatched }}
 
 runs:
   using: composite
   steps:
-    - name: Install build dependencies
+    # ============================================================
+    # Step 1: Detect mode (dispatch or publish)
+    # ============================================================
+    - name: Detect operation mode
+      id: detect-mode
       shell: bash
+      env:
+        MODE_INPUT: ${{ inputs.mode }}
+        EVENT_NAME: ${{ github.event_name }}
       run: |
-        sudo apt-get update -q
-        sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils
+        if [ -n "$MODE_INPUT" ]; then
+          MODE="$MODE_INPUT"
+          echo "Mode explicitly set to: $MODE"
+        elif [ "$EVENT_NAME" = "repository_dispatch" ]; then
+          MODE="publish"
+          echo "Auto-detected mode: publish (triggered by repository_dispatch)"
+        else
+          MODE="dispatch"
+          echo "Auto-detected mode: dispatch (not a repository_dispatch event)"
+        fi
+        
+        echo "mode=$MODE" >> $GITHUB_OUTPUT
+        echo "MODE=$MODE" >> $GITHUB_ENV
 
-    - name: Stage .deb package
-      id: stage
+    # ============================================================
+    # DISPATCH MODE: Upload artifact and trigger pages repo
+    # ============================================================
+    - name: Validate dispatch mode inputs
+      if: steps.detect-mode.outputs.mode == 'dispatch'
+      shell: bash
+      env:
+        DEB_PATH: ${{ inputs.deb-path }}
+        TOKEN: ${{ inputs.token }}
+        PAGES_REPO: ${{ inputs.pages-repo }}
+      run: |
+        [ -z "$DEB_PATH" ] && echo "::error::deb-path is required in dispatch mode" && exit 1
+        [ -z "$TOKEN" ] && echo "::error::token is required in dispatch mode" && exit 1
+        [ -z "$PAGES_REPO" ] && echo "::error::pages-repo is required in dispatch mode" && exit 1
+        [ ! -f "$DEB_PATH" ] && echo "::error::File not found: $DEB_PATH" && exit 1
+        echo "✓ Dispatch mode inputs validated"
+
+    - name: Extract package metadata (dispatch)
+      if: steps.detect-mode.outputs.mode == 'dispatch'
+      id: metadata
       shell: bash
       env:
         DEB_PATH: ${{ inputs.deb-path }}
       run: |
-        mkdir -p /tmp/deb-output
-        cp "$DEB_PATH" /tmp/deb-output/
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq dpkg-dev >/dev/null 2>&1
+        
+        PKG_NAME=$(dpkg-deb -f "$DEB_PATH" Package)
+        PKG_VERSION=$(dpkg-deb -f "$DEB_PATH" Version)
+        PKG_ARCH=$(dpkg-deb -f "$DEB_PATH" Architecture)
+        
+        echo "package-name=$PKG_NAME" >> $GITHUB_OUTPUT
+        echo "package-version=$PKG_VERSION" >> $GITHUB_OUTPUT
+        echo "package-arch=$PKG_ARCH" >> $GITHUB_OUTPUT
+        
+        echo "📦 Package: $PKG_NAME $PKG_VERSION ($PKG_ARCH)"
 
-        DEB_FILE=$(ls /tmp/deb-output/*.deb | head -1)
-        echo "deb-file=$(basename "$DEB_FILE")" >> $GITHUB_OUTPUT
-        echo "package-name=$(dpkg-deb -f "$DEB_FILE" Package)" >> $GITHUB_OUTPUT
-        echo "package-version=$(dpkg-deb -f "$DEB_FILE" Version)" >> $GITHUB_OUTPUT
-        echo "package-arch=$(dpkg-deb -f "$DEB_FILE" Architecture)" >> $GITHUB_OUTPUT
-
-    - name: Checkout pages repo
-      uses: actions/checkout@v6
+    - name: Upload .deb as artifact
+      if: steps.detect-mode.outputs.mode == 'dispatch'
+      uses: actions/upload-artifact@v4
       with:
-        repository: ${{ inputs.pages-repo }}
-        ref: ${{ inputs.pages-branch }}
-        token: ${{ inputs.token }}
-        path: _pages
+        name: deb-package-${{ steps.metadata.outputs.package-name }}-${{ steps.metadata.outputs.package-version }}
+        path: ${{ inputs.deb-path }}
+        retention-days: 1
+        if-no-files-found: error
 
-    - name: Set up APT repository structure
+    - name: Dispatch to pages repository
+      if: steps.detect-mode.outputs.mode == 'dispatch'
+      id: dispatch
       shell: bash
       env:
-        PKG_ARCH: ${{ steps.stage.outputs.package-arch }}
-        DIST: ${{ inputs.distribution }}
-        COMP: ${{ inputs.component }}
-        DEB_DIR: ${{ inputs.deb-dir }}
+        TOKEN: ${{ inputs.token }}
         PAGES_REPO: ${{ inputs.pages-repo }}
+        PAGES_BRANCH: ${{ inputs.pages-branch }}
+        DEB_DIR: ${{ inputs.deb-dir }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        COMPONENT: ${{ inputs.component }}
+        PKG_NAME: ${{ steps.metadata.outputs.package-name }}
+        PKG_VERSION: ${{ steps.metadata.outputs.package-version }}
+        PKG_ARCH: ${{ steps.metadata.outputs.package-arch }}
+        SOURCE_REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+        ARTIFACT_NAME: deb-package-${{ steps.metadata.outputs.package-name }}-${{ steps.metadata.outputs.package-version }}
+      run: |
+        echo "🚀 Dispatching to $PAGES_REPO..."
+        
+        HTTP_CODE=$(curl -s -o /tmp/dispatch-response.json -w "%{http_code}" \
+          -X POST \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: Bearer $TOKEN" \
+          "https://api.github.com/repos/$PAGES_REPO/dispatches" \
+          -d @- <<EOF
+        {
+          "event_type": "publish-deb",
+          "client_payload": {
+            "source_repo": "$SOURCE_REPO",
+            "run_id": "$RUN_ID",
+            "artifact_name": "$ARTIFACT_NAME",
+            "package_name": "$PKG_NAME",
+            "package_version": "$PKG_VERSION",
+            "package_arch": "$PKG_ARCH",
+            "pages_branch": "$PAGES_BRANCH",
+            "deb_dir": "$DEB_DIR",
+            "distribution": "$DISTRIBUTION",
+            "component": "$COMPONENT"
+          }
+        }
+        EOF
+        )
+        
+        if [ "$HTTP_CODE" = "204" ]; then
+          echo "✓ Successfully dispatched to $PAGES_REPO"
+          echo "dispatched=true" >> $GITHUB_OUTPUT
+        else
+          echo "::error::Failed to dispatch (HTTP $HTTP_CODE)"
+          cat /tmp/dispatch-response.json
+          exit 1
+        fi
+
+    # ============================================================
+    # PUBLISH MODE: Download artifact and publish to APT repo
+    # ============================================================
+    - name: Extract event payload (publish)
+      if: steps.detect-mode.outputs.mode == 'publish'
+      id: payload
+      shell: bash
+      run: |
+        # Extract from repository_dispatch event
+        echo "source-repo=${{ github.event.client_payload.source_repo }}" >> $GITHUB_OUTPUT
+        echo "run-id=${{ github.event.client_payload.run_id }}" >> $GITHUB_OUTPUT
+        echo "artifact-name=${{ github.event.client_payload.artifact_name }}" >> $GITHUB_OUTPUT
+        echo "package-name=${{ github.event.client_payload.package_name }}" >> $GITHUB_OUTPUT
+        echo "package-version=${{ github.event.client_payload.package_version }}" >> $GITHUB_OUTPUT
+        echo "package-arch=${{ github.event.client_payload.package_arch }}" >> $GITHUB_OUTPUT
+        echo "pages-branch=${{ github.event.client_payload.pages_branch }}" >> $GITHUB_OUTPUT
+        echo "deb-dir=${{ github.event.client_payload.deb_dir }}" >> $GITHUB_OUTPUT
+        echo "distribution=${{ github.event.client_payload.distribution }}" >> $GITHUB_OUTPUT
+        echo "component=${{ github.event.client_payload.component }}" >> $GITHUB_OUTPUT
+        
+        echo "📥 Publishing: ${{ github.event.client_payload.package_name }} ${{ github.event.client_payload.package_version }}"
+        echo "📂 From: ${{ github.event.client_payload.source_repo }}"
+
+    - name: Download artifact from source repo
+      if: steps.detect-mode.outputs.mode == 'publish'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
+        RUN_ID: ${{ github.event.client_payload.run_id }}
+        ARTIFACT_NAME: ${{ github.event.client_payload.artifact_name }}
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq dpkg-dev apt-utils gnupg >/dev/null 2>&1
+        
+        mkdir -p /tmp/deb-incoming
+        cd /tmp/deb-incoming
+        
+        echo "Downloading artifact $ARTIFACT_NAME from $SOURCE_REPO run $RUN_ID..."
+        gh run download "$RUN_ID" \
+          --repo "$SOURCE_REPO" \
+          --name "$ARTIFACT_NAME"
+        
+        DEB_FILE=$(ls *.deb | head -1)
+        [ -z "$DEB_FILE" ] && echo "::error::No .deb file found in artifact" && exit 1
+        echo "✓ Downloaded: $DEB_FILE"
+
+    - name: Checkout pages repository
+      if: steps.detect-mode.outputs.mode == 'publish'
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ github.event.client_payload.pages_branch }}
+        token: ${{ github.token }}
+        path: _pages
+
+    - name: Publish to APT repository
+      if: steps.detect-mode.outputs.mode == 'publish'
+      shell: bash
+      env:
+        PKG_ARCH: ${{ github.event.client_payload.package_arch }}
+        DIST: ${{ github.event.client_payload.distribution }}
+        COMP: ${{ github.event.client_payload.component }}
+        DEB_DIR: ${{ github.event.client_payload.deb_dir }}
       run: |
         BASE="_pages/$DEB_DIR"
-
         POOL_DIR="$BASE/pool/$COMP"
         BINARY_DIR="$BASE/dists/$DIST/$COMP/binary-$PKG_ARCH"
-
+        
         mkdir -p "$POOL_DIR" "$BINARY_DIR"
-
-        # Add .deb to pool
-        cp /tmp/deb-output/*.deb "$POOL_DIR/"
-
-        # Generate Packages index from the whole pool
+        
+        # Copy .deb to pool
+        cp /tmp/deb-incoming/*.deb "$POOL_DIR/"
+        echo "✓ Added package to pool"
+        
+        # Generate Packages index
         cd "$BASE"
         dpkg-scanpackages --multiversion pool/ \
           > "dists/$DIST/$COMP/binary-$PKG_ARCH/Packages"
         gzip -k -f "dists/$DIST/$COMP/binary-$PKG_ARCH/Packages"
-
-        # Generate Release file with checksums
+        echo "✓ Generated Packages index"
+        
+        # Generate Release file
         cd "dists/$DIST"
-        OWNER=$(echo "$PAGES_REPO" | cut -d'/' -f1)
-        REPO=$(echo "$PAGES_REPO" | cut -d'/' -f2)
         {
-          echo "Origin: $OWNER"
-          echo "Label: $REPO"
+          echo "Origin: ${GITHUB_REPOSITORY_OWNER}"
+          echo "Label: ${GITHUB_REPOSITORY##*/}"
           echo "Suite: $DIST"
           echo "Codename: $DIST"
           echo "Architectures: $PKG_ARCH"
           echo "Components: $COMP"
-          echo "Description: $REPO APT Repository"
+          echo "Description: APT Repository"
           apt-ftparchive release .
         } > Release
+        echo "✓ Generated Release file"
 
-    - name: Sign APT repository with GPG
-      if: inputs.gpg-private-key != ''
+    - name: Sign repository with GPG
+      if: steps.detect-mode.outputs.mode == 'publish' && inputs.gpg-private-key != ''
       shell: bash
       env:
         GPG_PRIVATE_KEY: ${{ inputs.gpg-private-key }}
         GPG_PASSPHRASE: ${{ inputs.gpg-passphrase }}
-        DEB_DIR: ${{ inputs.deb-dir }}
-        DISTRIBUTION: ${{ inputs.distribution }}
+        DEB_DIR: ${{ github.event.client_payload.deb_dir }}
+        DIST: ${{ github.event.client_payload.distribution }}
       run: |
         echo "$GPG_PRIVATE_KEY" | gpg --batch --yes --import
-
-        RELEASE="_pages/$DEB_DIR/dists/$DISTRIBUTION/Release"
+        
+        RELEASE="_pages/$DEB_DIR/dists/$DIST/Release"
         RELEASE_DIR="$(dirname "$RELEASE")"
-
-        # Build gpg args; use passphrase-fd to avoid shell injection
+        
         sign() {
           local extra_args="$1"
           local output="$2"
@@ -160,32 +319,35 @@ runs:
             gpg --batch --yes --armor $extra_args -o "$output" "$RELEASE"
           fi
         }
-
+        
         sign "--detach-sign" "${RELEASE}.gpg"
         sign "--clearsign" "${RELEASE_DIR}/InRelease"
-
-        # Export the public key so users can add it to their apt trusted keys
         gpg --armor --export > "_pages/$DEB_DIR/pubkey.gpg"
+        
+        echo "✓ Signed repository with GPG"
 
-    - name: Commit and push
+    - name: Commit and push to pages repo
+      if: steps.detect-mode.outputs.mode == 'publish'
       shell: bash
       working-directory: _pages
       env:
-        DEB_DIR: ${{ inputs.deb-dir }}
-        PACKAGE_NAME: ${{ steps.stage.outputs.package-name }}
-        PACKAGE_VERSION: ${{ steps.stage.outputs.package-version }}
-        PAGES_BRANCH: ${{ inputs.pages-branch }}
+        DEB_DIR: ${{ github.event.client_payload.deb_dir }}
+        PKG_NAME: ${{ github.event.client_payload.package_name }}
+        PKG_VERSION: ${{ github.event.client_payload.package_version }}
+        SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
+        PAGES_BRANCH: ${{ github.event.client_payload.pages_branch }}
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-
+        
         git add "$DEB_DIR/"
-        git diff --staged --quiet && echo "No changes to publish." && exit 0
-
-        git commit -m "chore: publish ${PACKAGE_NAME} ${PACKAGE_VERSION} to apt repo"
-
-        for i in 1 2 3; do
-          git pull --rebase origin "$PAGES_BRANCH" && git push && break
-          echo "Push attempt $i failed, retrying in $((i * 5))s..."
-          sleep $((i * 5))
-        done
+        
+        if git diff --staged --quiet; then
+          echo "⚠️  No changes to commit"
+          exit 0
+        fi
+        
+        git commit -m "chore: publish ${PKG_NAME} ${PKG_VERSION} from ${SOURCE_REPO}"
+        git push origin "$PAGES_BRANCH"
+        
+        echo "✓ Published to pages repository"
