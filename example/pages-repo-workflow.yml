@@ -1,0 +1,38 @@
+# Example workflow for PAGES REPOSITORY
+# This receives dispatches and publishes packages to the APT repo
+
+name: Publish Package to APT Repository
+
+on:
+  repository_dispatch:
+    types: [publish-deb]
+
+# CRITICAL: Force sequential execution to prevent race conditions
+concurrency:
+  group: apt-repository-update
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Publish to APT repository
+        uses: your-org/deb-publish@v2  # Replace with your action path
+        with:
+          # Mode is auto-detected (publish) or specify explicitly
+          mode: publish
+          
+          # GPG signing (optional but recommended)
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
+          
+          # The action automatically receives configuration from the dispatch event:
+          # - source_repo, run_id, artifact_name
+          # - package metadata (name, version, arch)
+          # - pages_branch, deb_dir, distribution, component
+      
+      - name: Summary
+        run: |
+          echo "✅ Published ${{ github.event.client_payload.package_name }} ${{ github.event.client_payload.package_version }}"
+          echo "📦 From: ${{ github.event.client_payload.source_repo }}"

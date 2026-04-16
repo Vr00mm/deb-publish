@@ -1,0 +1,40 @@
+# Example workflow for APP REPOSITORIES
+# This dispatches package publication to your pages repo
+
+name: Build and Publish Package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-and-dispatch:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      
+      - name: Build .deb package
+        run: |
+          # Your build process here
+          # Example: dpkg-deb --build package/ myapp.deb
+          dpkg-deb --build example/package myapp.deb
+      
+      - name: Dispatch to pages repository
+        uses: your-org/deb-publish@v2  # Replace with your action path
+        with:
+          # Mode is auto-detected (dispatch) or specify explicitly
+          mode: dispatch
+          
+          # Required for dispatch mode
+          deb-path: myapp.deb
+          token: ${{ secrets.PAGES_REPO_TOKEN }}
+          pages-repo: your-org/your-org.github.io  # Replace with your pages repo
+          
+          # Optional configuration
+          pages-branch: master
+          deb-dir: apt
+          distribution: stable
+          component: main
