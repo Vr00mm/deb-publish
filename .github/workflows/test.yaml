@@ -1,0 +1,34 @@
+name: Test — publish hello-world .deb
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Stamp version into control file
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^Version:.*/Version: $VERSION/" setup/package/DEBIAN/control
+
+      - name: Build .deb
+        id: build
+        uses: ./
+        with:
+          mode: build
+          package-dir: setup/package
+          output-path: dist/hello-world.deb
+
+      - name: Dispatch to pages repository
+        uses: ./
+        with:
+          deb-path: ${{ steps.build.outputs.deb-path }}
+          token: ${{ secrets.PAGES_TOKEN }}
+          pages-repo: Vr00mm/vr00mm.github.io
