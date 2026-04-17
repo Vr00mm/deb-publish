@@ -37,6 +37,10 @@ inputs:
   pages-repo:
     description: '[publish] Pages repository (owner/repo), e.g. myorg/myorg.github.io'
     required: false
+  follow:
+    description: '[publish] Wait for the pages workflow to complete and report its status.'
+    required: false
+    default: 'true'
 
   # ── publish — pages repo side (receive via workflow_call) ─────────────────
   source-repo:
@@ -122,6 +126,9 @@ outputs:
   dispatched:
     description: '[publish] Whether the dispatch was sent successfully'
     value: ${{ steps.dispatch.outputs.dispatched }}
+  pages-run-id:
+    description: '[publish] Run ID of the triggered pages workflow'
+    value: ${{ steps.dispatch.outputs.pages-run-id }}
   deleted-count:
     description: '[delete] Number of .deb files removed from the pool'
     value: ${{ steps.delete-find.outputs.count }}
@@ -272,44 +279,81 @@ runs:
         SOURCE_REPO: ${{ github.repository }}
         RUN_ID: ${{ github.run_id }}
         ARTIFACT_NAME: deb-package-${{ steps.dispatch-metadata.outputs.package-name }}-${{ steps.dispatch-metadata.outputs.package-version }}
+        FOLLOW: ${{ inputs.follow }}
       run: |
         DIST="${DISTRIBUTION:-stable}"
         COMP="${COMPONENT:-main}"
 
+        DISPATCH_TS=$(date -u +%s)
+
         echo "🚀 Dispatching to $PAGES_REPO..."
 
-        HTTP_CODE=$(curl -s -o /tmp/dispatch-response.json -w "%{http_code}" \
-          -X POST \
-          -H "Accept: application/vnd.github.v3+json" \
-          -H "Authorization: Bearer $TOKEN" \
-          "https://api.github.com/repos/$PAGES_REPO/dispatches" \
-          -d @- <<EOF
-        {
-          "event_type": "publish-deb",
-          "client_payload": {
-            "source_repo":     "$SOURCE_REPO",
-            "run_id":          "$RUN_ID",
-            "artifact_name":   "$ARTIFACT_NAME",
-            "package_name":    "$PKG_NAME",
-            "package_version": "$PKG_VERSION",
-            "package_arch":    "$PKG_ARCH",
-            "pages_branch":    "$PAGES_BRANCH",
-            "deb_dir":         "$DEB_DIR",
-            "distribution":    "$DIST",
-            "component":       "$COMP"
-          }
-        }
-        EOF
-        )
+        GH_TOKEN="$TOKEN" gh api "repos/$PAGES_REPO/dispatches" \
+          --method POST \
+          --input <(jq -n \
+            --arg event_type      "publish-deb" \
+            --arg source_repo     "$SOURCE_REPO" \
+            --arg run_id          "$RUN_ID" \
+            --arg artifact_name   "$ARTIFACT_NAME" \
+            --arg package_name    "$PKG_NAME" \
+            --arg package_version "$PKG_VERSION" \
+            --arg package_arch    "$PKG_ARCH" \
+            --arg pages_branch    "$PAGES_BRANCH" \
+            --arg deb_dir         "$DEB_DIR" \
+            --arg distribution    "$DIST" \
+            --arg component       "$COMP" \
+            '{event_type: $event_type, client_payload: {
+              source_repo:     $source_repo,
+              run_id:          $run_id,
+              artifact_name:   $artifact_name,
+              package_name:    $package_name,
+              package_version: $package_version,
+              package_arch:    $package_arch,
+              pages_branch:    $pages_branch,
+              deb_dir:         $deb_dir,
+              distribution:    $distribution,
+              component:       $component
+            }}')
 
-        if [ "$HTTP_CODE" = "204" ]; then
-          echo "✓ Dispatched to $PAGES_REPO"
-          echo "dispatched=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "::error::Dispatch failed (HTTP $HTTP_CODE)"
-          cat /tmp/dispatch-response.json
-          exit 1
+        echo "✓ Dispatched to $PAGES_REPO"
+        echo "dispatched=true" >> "$GITHUB_OUTPUT"
+
+        if [ "${FOLLOW:-true}" != "true" ]; then
+          echo "follow=false — skipping watch"
+          exit 0
         fi
+
+        PAGES_RUN_ID=""
+        DEADLINE=$(( DISPATCH_TS + 60 ))
+
+        echo "⏳ Waiting for pages workflow run..."
+
+        while [ "$(date -u +%s)" -lt "$DEADLINE" ]; do
+          PAGES_RUN_ID=$(
+            GH_TOKEN="$TOKEN" gh run list \
+              --repo "$PAGES_REPO" \
+              --event repository_dispatch \
+              --limit 10 \
+              --json id,createdAt \
+            | jq --argjson ts "$DISPATCH_TS" \
+                '[.[] | select(.createdAt | fromdateiso8601 >= $ts)]
+                 | sort_by(.createdAt) | last | .id // empty'
+          )
+          [ -n "$PAGES_RUN_ID" ] && break
+          sleep 3
+        done
+
+        if [ -z "$PAGES_RUN_ID" ]; then
+          echo "::warning::Pages workflow run not found within 60s — check manually: https://github.com/$PAGES_REPO/actions"
+          exit 0
+        fi
+
+        echo "pages-run-id=$PAGES_RUN_ID" >> "$GITHUB_OUTPUT"
+        echo "📋 Pages run: https://github.com/$PAGES_REPO/actions/runs/$PAGES_RUN_ID"
+
+        GH_TOKEN="$TOKEN" gh run watch "$PAGES_RUN_ID" \
+          --repo "$PAGES_REPO" \
+          --exit-status
 
     # ══════════════════════════════════════════════════════════════════════════
     # PUBLISH — receive side (pages repo, triggered by repository_dispatch)
