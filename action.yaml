@@ -1,5 +1,5 @@
 name: 'Debian Package Publisher for GitHub Pages'
-description: 'Unified action for dispatching and publishing .deb packages to APT repositories on GitHub Pages.'
+description: 'Build, publish, sign, list, and delete .deb packages in APT repositories on GitHub Pages.'
 branding:
   icon: 'archive'
   color: 'orange'
@@ -7,78 +7,114 @@ branding:
 inputs:
   mode:
     description: |
-      Action mode: 'dispatch' or 'publish'.
-      - dispatch: From app repos - triggers pages repo to publish (requires: deb-path, token, pages-repo)
-      - publish: From pages repo - receives and publishes package (requires: gpg-private-key if signing)
-      Leave empty for auto-detection based on github.event_name.
+      Action mode: 'build', 'publish', 'sign', 'list', or 'delete'.
+      - build:   Build a .deb package from a source directory.
+      - publish: Dispatch from an app repo OR receive and publish in the pages repo (auto-detected).
+      - sign:    Sign (or re-sign) the APT repository with a GPG key (pages repo).
+      - list:    List all packages and versions in the APT repository (pages repo).
+      - delete:  Remove a specific package/version from the APT repository (pages repo).
+      Leave empty to auto-detect publish vs receive based on the triggering event.
     required: false
     default: ''
-  
-  # ============ Dispatch Mode Inputs (app repos) ============
+
+  # ── build ──────────────────────────────────────────────────────────────────
+  package-dir:
+    description: '[build] Directory containing DEBIAN/control and the package file tree.'
+    required: false
+    default: 'package'
+  output-path:
+    description: '[build] Output path for the generated .deb file.'
+    required: false
+    default: 'package.deb'
+
+  # ── publish — app repo side (dispatch) ────────────────────────────────────
   deb-path:
-    description: '[dispatch mode] Path to the .deb file to publish.'
+    description: '[publish] Path to the .deb file to publish.'
     required: false
   token:
-    description: '[dispatch mode] GitHub token with repository_dispatch permission on pages-repo.'
+    description: '[publish] GitHub token with repository_dispatch permission on pages-repo.'
     required: false
   pages-repo:
-    description: '[dispatch mode] Pages repository (owner/repo), e.g. myorg/myorg.github.io'
+    description: '[publish] Pages repository (owner/repo), e.g. myorg/myorg.github.io'
     required: false
-  
-  # ============ Shared Configuration Inputs ============
+
+  # ── shared: publish (both sides) · sign · list · delete ───────────────────
   pages-branch:
-    description: 'Branch of the pages repository (default: master).'
+    description: 'Branch of the pages repository.'
     required: false
     default: 'master'
   deb-dir:
-    description: 'Subdirectory in pages repo for APT repository (default: apt).'
+    description: 'Subdirectory in the pages repo used as the APT repository root.'
     required: false
     default: 'apt'
   distribution:
-    description: 'APT distribution name (e.g. stable, focal, jammy).'
+    description: |
+      APT distribution name (e.g. stable, focal, jammy).
+      For publish/sign/delete: defaults to 'stable' when left empty.
+      For list: leave empty to show all distributions.
     required: false
-    default: 'stable'
+    default: ''
   component:
-    description: 'APT component (e.g. main, contrib).'
+    description: 'APT component (e.g. main, contrib). Defaults to main when left empty.'
     required: false
-    default: 'main'
-  
-  # ============ Publish Mode Inputs (pages repo) ============
+    default: ''
+
+  # ── sign ───────────────────────────────────────────────────────────────────
   gpg-private-key:
     description: |
-      [publish mode] ASCII-armored GPG private key for signing.
-      Leave empty to publish unsigned (not recommended).
+      [sign] ASCII-armored GPG private key for signing the repository.
       Export: gpg --armor --export-secret-keys KEY_ID
     required: false
     default: ''
   gpg-passphrase:
-    description: '[publish mode] Passphrase for the GPG private key.'
+    description: '[sign] Passphrase for the GPG private key.'
     required: false
     default: ''
 
+  # ── delete ─────────────────────────────────────────────────────────────────
+  package-name:
+    description: '[delete] Package name to remove (e.g. myapp).'
+    required: false
+    default: ''
+  version:
+    description: '[delete] Version to remove. Leave empty to remove ALL versions of the package.'
+    required: false
+    default: ''
+  dry-run:
+    description: '[delete] Preview what would be removed without applying any changes.'
+    required: false
+    default: 'false'
+
 outputs:
   mode:
-    description: 'Mode used: dispatch or publish'
+    description: 'Effective internal mode: build · dispatch · receive · sign · list · delete'
     value: ${{ steps.detect-mode.outputs.mode }}
+  deb-path:
+    description: '[build] Path to the generated .deb file'
+    value: ${{ steps.build-package.outputs.deb-path }}
   package-name:
-    description: 'Package name'
-    value: ${{ steps.metadata.outputs.package-name }}
+    description: 'Package name (build or publish)'
+    value: ${{ steps.build-metadata.outputs.package-name || steps.dispatch-metadata.outputs.package-name }}
   package-version:
-    description: 'Package version'
-    value: ${{ steps.metadata.outputs.package-version }}
+    description: 'Package version (build or publish)'
+    value: ${{ steps.build-metadata.outputs.package-version || steps.dispatch-metadata.outputs.package-version }}
   package-arch:
-    description: 'Package architecture'
-    value: ${{ steps.metadata.outputs.package-arch }}
+    description: 'Package architecture (build or publish)'
+    value: ${{ steps.build-metadata.outputs.package-arch || steps.dispatch-metadata.outputs.package-arch }}
   dispatched:
-    description: '[dispatch mode] Whether dispatch was sent successfully'
+    description: '[publish] Whether the dispatch was sent successfully'
     value: ${{ steps.dispatch.outputs.dispatched }}
+  deleted-count:
+    description: '[delete] Number of .deb files removed from the pool'
+    value: ${{ steps.delete-find.outputs.count }}
 
 runs:
   using: composite
   steps:
-    # ============================================================
-    # Step 1: Detect mode (dispatch or publish)
-    # ============================================================
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Detect mode
+    # ══════════════════════════════════════════════════════════════════════════
     - name: Detect operation mode
       id: detect-mode
       shell: bash
@@ -86,68 +122,122 @@ runs:
         MODE_INPUT: ${{ inputs.mode }}
         EVENT_NAME: ${{ github.event_name }}
       run: |
-        if [ -n "$MODE_INPUT" ]; then
-          MODE="$MODE_INPUT"
-          echo "Mode explicitly set to: $MODE"
-        elif [ "$EVENT_NAME" = "repository_dispatch" ]; then
-          MODE="publish"
-          echo "Auto-detected mode: publish (triggered by repository_dispatch)"
-        else
-          MODE="dispatch"
-          echo "Auto-detected mode: dispatch (not a repository_dispatch event)"
-        fi
-        
-        echo "mode=$MODE" >> $GITHUB_OUTPUT
-        echo "MODE=$MODE" >> $GITHUB_ENV
+        case "$MODE_INPUT" in
+          build|sign|list|delete)
+            MODE="$MODE_INPUT"
+            ;;
+          publish|dispatch|'')
+            if [ "$EVENT_NAME" = "repository_dispatch" ]; then
+              MODE="receive"
+            else
+              MODE="dispatch"
+            fi
+            ;;
+          receive)
+            MODE="receive"
+            ;;
+          *)
+            echo "::error::Unknown mode '$MODE_INPUT'. Valid values: build, publish, sign, list, delete"
+            exit 1
+            ;;
+        esac
 
-    # ============================================================
-    # DISPATCH MODE: Upload artifact and trigger pages repo
-    # ============================================================
-    - name: Validate dispatch mode inputs
-      if: steps.detect-mode.outputs.mode == 'dispatch'
+        echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+        echo "MODE=$MODE"  >> "$GITHUB_ENV"
+        echo "Effective mode: $MODE"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # BUILD
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: Install build tools
+      if: env.MODE == 'build'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq dpkg-dev >/dev/null 2>&1
+
+    - name: Build .deb package
+      if: env.MODE == 'build'
+      id: build-package
+      shell: bash
+      env:
+        PACKAGE_DIR: ${{ inputs.package-dir }}
+        OUTPUT_PATH: ${{ inputs.output-path }}
+      run: |
+        [ ! -d "$PACKAGE_DIR" ] \
+          && echo "::error::package-dir not found: $PACKAGE_DIR" && exit 1
+        [ ! -f "$PACKAGE_DIR/DEBIAN/control" ] \
+          && echo "::error::Missing DEBIAN/control in $PACKAGE_DIR" && exit 1
+
+        dpkg-deb --build "$PACKAGE_DIR" "$OUTPUT_PATH"
+        echo "✓ Built: $OUTPUT_PATH"
+        echo "deb-path=$OUTPUT_PATH" >> "$GITHUB_OUTPUT"
+
+    - name: Extract package metadata (build)
+      if: env.MODE == 'build'
+      id: build-metadata
+      shell: bash
+      env:
+        OUTPUT_PATH: ${{ inputs.output-path }}
+      run: |
+        PKG_NAME=$(dpkg-deb    -f "$OUTPUT_PATH" Package)
+        PKG_VERSION=$(dpkg-deb -f "$OUTPUT_PATH" Version)
+        PKG_ARCH=$(dpkg-deb    -f "$OUTPUT_PATH" Architecture)
+
+        echo "package-name=$PKG_NAME"       >> "$GITHUB_OUTPUT"
+        echo "package-version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+        echo "package-arch=$PKG_ARCH"       >> "$GITHUB_OUTPUT"
+
+        echo "📦 $PKG_NAME $PKG_VERSION ($PKG_ARCH)"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PUBLISH — dispatch side (app repo → pages repo)
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: Validate dispatch inputs
+      if: env.MODE == 'dispatch'
       shell: bash
       env:
         DEB_PATH: ${{ inputs.deb-path }}
         TOKEN: ${{ inputs.token }}
         PAGES_REPO: ${{ inputs.pages-repo }}
       run: |
-        [ -z "$DEB_PATH" ] && echo "::error::deb-path is required in dispatch mode" && exit 1
-        [ -z "$TOKEN" ] && echo "::error::token is required in dispatch mode" && exit 1
-        [ -z "$PAGES_REPO" ] && echo "::error::pages-repo is required in dispatch mode" && exit 1
-        [ ! -f "$DEB_PATH" ] && echo "::error::File not found: $DEB_PATH" && exit 1
-        echo "✓ Dispatch mode inputs validated"
+        [ -z "$DEB_PATH" ]   && echo "::error::deb-path is required in publish mode"   && exit 1
+        [ -z "$TOKEN" ]      && echo "::error::token is required in publish mode"      && exit 1
+        [ -z "$PAGES_REPO" ] && echo "::error::pages-repo is required in publish mode" && exit 1
+        [ ! -f "$DEB_PATH" ] && echo "::error::File not found: $DEB_PATH"              && exit 1
+        echo "✓ Inputs validated"
 
     - name: Extract package metadata (dispatch)
-      if: steps.detect-mode.outputs.mode == 'dispatch'
-      id: metadata
+      if: env.MODE == 'dispatch'
+      id: dispatch-metadata
       shell: bash
       env:
         DEB_PATH: ${{ inputs.deb-path }}
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y -qq dpkg-dev >/dev/null 2>&1
-        
-        PKG_NAME=$(dpkg-deb -f "$DEB_PATH" Package)
+
+        PKG_NAME=$(dpkg-deb    -f "$DEB_PATH" Package)
         PKG_VERSION=$(dpkg-deb -f "$DEB_PATH" Version)
-        PKG_ARCH=$(dpkg-deb -f "$DEB_PATH" Architecture)
-        
-        echo "package-name=$PKG_NAME" >> $GITHUB_OUTPUT
-        echo "package-version=$PKG_VERSION" >> $GITHUB_OUTPUT
-        echo "package-arch=$PKG_ARCH" >> $GITHUB_OUTPUT
-        
-        echo "📦 Package: $PKG_NAME $PKG_VERSION ($PKG_ARCH)"
+        PKG_ARCH=$(dpkg-deb    -f "$DEB_PATH" Architecture)
+
+        echo "package-name=$PKG_NAME"       >> "$GITHUB_OUTPUT"
+        echo "package-version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+        echo "package-arch=$PKG_ARCH"       >> "$GITHUB_OUTPUT"
+
+        echo "📦 $PKG_NAME $PKG_VERSION ($PKG_ARCH)"
 
     - name: Upload .deb as artifact
-      if: steps.detect-mode.outputs.mode == 'dispatch'
-      uses: actions/upload-artifact@v4
+      if: env.MODE == 'dispatch'
+      uses: actions/upload-artifact@v7
       with:
-        name: deb-package-${{ steps.metadata.outputs.package-name }}-${{ steps.metadata.outputs.package-version }}
+        name: deb-package-${{ steps.dispatch-metadata.outputs.package-name }}-${{ steps.dispatch-metadata.outputs.package-version }}
         path: ${{ inputs.deb-path }}
         retention-days: 1
         if-no-files-found: error
 
     - name: Dispatch to pages repository
-      if: steps.detect-mode.outputs.mode == 'dispatch'
+      if: env.MODE == 'dispatch'
       id: dispatch
       shell: bash
       env:
@@ -157,15 +247,18 @@ runs:
         DEB_DIR: ${{ inputs.deb-dir }}
         DISTRIBUTION: ${{ inputs.distribution }}
         COMPONENT: ${{ inputs.component }}
-        PKG_NAME: ${{ steps.metadata.outputs.package-name }}
-        PKG_VERSION: ${{ steps.metadata.outputs.package-version }}
-        PKG_ARCH: ${{ steps.metadata.outputs.package-arch }}
+        PKG_NAME: ${{ steps.dispatch-metadata.outputs.package-name }}
+        PKG_VERSION: ${{ steps.dispatch-metadata.outputs.package-version }}
+        PKG_ARCH: ${{ steps.dispatch-metadata.outputs.package-arch }}
         SOURCE_REPO: ${{ github.repository }}
         RUN_ID: ${{ github.run_id }}
-        ARTIFACT_NAME: deb-package-${{ steps.metadata.outputs.package-name }}-${{ steps.metadata.outputs.package-version }}
+        ARTIFACT_NAME: deb-package-${{ steps.dispatch-metadata.outputs.package-name }}-${{ steps.dispatch-metadata.outputs.package-version }}
       run: |
+        DIST="${DISTRIBUTION:-stable}"
+        COMP="${COMPONENT:-main}"
+
         echo "🚀 Dispatching to $PAGES_REPO..."
-        
+
         HTTP_CODE=$(curl -s -o /tmp/dispatch-response.json -w "%{http_code}" \
           -X POST \
           -H "Accept: application/vnd.github.v3+json" \
@@ -175,55 +268,42 @@ runs:
         {
           "event_type": "publish-deb",
           "client_payload": {
-            "source_repo": "$SOURCE_REPO",
-            "run_id": "$RUN_ID",
-            "artifact_name": "$ARTIFACT_NAME",
-            "package_name": "$PKG_NAME",
+            "source_repo":     "$SOURCE_REPO",
+            "run_id":          "$RUN_ID",
+            "artifact_name":   "$ARTIFACT_NAME",
+            "package_name":    "$PKG_NAME",
             "package_version": "$PKG_VERSION",
-            "package_arch": "$PKG_ARCH",
-            "pages_branch": "$PAGES_BRANCH",
-            "deb_dir": "$DEB_DIR",
-            "distribution": "$DISTRIBUTION",
-            "component": "$COMPONENT"
+            "package_arch":    "$PKG_ARCH",
+            "pages_branch":    "$PAGES_BRANCH",
+            "deb_dir":         "$DEB_DIR",
+            "distribution":    "$DIST",
+            "component":       "$COMP"
           }
         }
         EOF
         )
-        
+
         if [ "$HTTP_CODE" = "204" ]; then
-          echo "✓ Successfully dispatched to $PAGES_REPO"
-          echo "dispatched=true" >> $GITHUB_OUTPUT
+          echo "✓ Dispatched to $PAGES_REPO"
+          echo "dispatched=true" >> "$GITHUB_OUTPUT"
         else
-          echo "::error::Failed to dispatch (HTTP $HTTP_CODE)"
+          echo "::error::Dispatch failed (HTTP $HTTP_CODE)"
           cat /tmp/dispatch-response.json
           exit 1
         fi
 
-    # ============================================================
-    # PUBLISH MODE: Download artifact and publish to APT repo
-    # ============================================================
-    - name: Extract event payload (publish)
-      if: steps.detect-mode.outputs.mode == 'publish'
-      id: payload
+    # ══════════════════════════════════════════════════════════════════════════
+    # PUBLISH — receive side (pages repo, triggered by repository_dispatch)
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: Install publish tools
+      if: env.MODE == 'receive'
       shell: bash
       run: |
-        # Extract from repository_dispatch event
-        echo "source-repo=${{ github.event.client_payload.source_repo }}" >> $GITHUB_OUTPUT
-        echo "run-id=${{ github.event.client_payload.run_id }}" >> $GITHUB_OUTPUT
-        echo "artifact-name=${{ github.event.client_payload.artifact_name }}" >> $GITHUB_OUTPUT
-        echo "package-name=${{ github.event.client_payload.package_name }}" >> $GITHUB_OUTPUT
-        echo "package-version=${{ github.event.client_payload.package_version }}" >> $GITHUB_OUTPUT
-        echo "package-arch=${{ github.event.client_payload.package_arch }}" >> $GITHUB_OUTPUT
-        echo "pages-branch=${{ github.event.client_payload.pages_branch }}" >> $GITHUB_OUTPUT
-        echo "deb-dir=${{ github.event.client_payload.deb_dir }}" >> $GITHUB_OUTPUT
-        echo "distribution=${{ github.event.client_payload.distribution }}" >> $GITHUB_OUTPUT
-        echo "component=${{ github.event.client_payload.component }}" >> $GITHUB_OUTPUT
-        
-        echo "📥 Publishing: ${{ github.event.client_payload.package_name }} ${{ github.event.client_payload.package_version }}"
-        echo "📂 From: ${{ github.event.client_payload.source_repo }}"
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq dpkg-dev apt-utils >/dev/null 2>&1
 
     - name: Download artifact from source repo
-      if: steps.detect-mode.outputs.mode == 'publish'
+      if: env.MODE == 'receive'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -231,23 +311,20 @@ runs:
         RUN_ID: ${{ github.event.client_payload.run_id }}
         ARTIFACT_NAME: ${{ github.event.client_payload.artifact_name }}
       run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq dpkg-dev apt-utils gnupg >/dev/null 2>&1
-        
         mkdir -p /tmp/deb-incoming
         cd /tmp/deb-incoming
-        
-        echo "Downloading artifact $ARTIFACT_NAME from $SOURCE_REPO run $RUN_ID..."
+
+        echo "Downloading $ARTIFACT_NAME from $SOURCE_REPO (run $RUN_ID)..."
         gh run download "$RUN_ID" \
           --repo "$SOURCE_REPO" \
           --name "$ARTIFACT_NAME"
-        
-        DEB_FILE=$(ls *.deb | head -1)
+
+        DEB_FILE=$(ls *.deb 2>/dev/null | head -1)
         [ -z "$DEB_FILE" ] && echo "::error::No .deb file found in artifact" && exit 1
         echo "✓ Downloaded: $DEB_FILE"
 
-    - name: Checkout pages repository
-      if: steps.detect-mode.outputs.mode == 'publish'
+    - name: Checkout pages repository (receive)
+      if: env.MODE == 'receive'
       uses: actions/checkout@v6
       with:
         ref: ${{ github.event.client_payload.pages_branch }}
@@ -255,7 +332,7 @@ runs:
         path: _pages
 
     - name: Publish to APT repository
-      if: steps.detect-mode.outputs.mode == 'publish'
+      if: env.MODE == 'receive'
       shell: bash
       env:
         PKG_ARCH: ${{ github.event.client_payload.package_arch }}
@@ -266,21 +343,17 @@ runs:
         BASE="_pages/$DEB_DIR"
         POOL_DIR="$BASE/pool/$COMP"
         BINARY_DIR="$BASE/dists/$DIST/$COMP/binary-$PKG_ARCH"
-        
+
         mkdir -p "$POOL_DIR" "$BINARY_DIR"
-        
-        # Copy .deb to pool
         cp /tmp/deb-incoming/*.deb "$POOL_DIR/"
-        echo "✓ Added package to pool"
-        
-        # Generate Packages index
+        echo "✓ Added to pool"
+
         cd "$BASE"
         dpkg-scanpackages --multiversion pool/ \
           > "dists/$DIST/$COMP/binary-$PKG_ARCH/Packages"
         gzip -k -f "dists/$DIST/$COMP/binary-$PKG_ARCH/Packages"
         echo "✓ Generated Packages index"
-        
-        # Generate Release file
+
         cd "dists/$DIST"
         {
           echo "Origin: ${GITHUB_REPOSITORY_OWNER}"
@@ -292,42 +365,10 @@ runs:
           echo "Description: APT Repository"
           apt-ftparchive release .
         } > Release
-        echo "✓ Generated Release file"
+        echo "✓ Generated Release"
 
-    - name: Sign repository with GPG
-      if: steps.detect-mode.outputs.mode == 'publish' && inputs.gpg-private-key != ''
-      shell: bash
-      env:
-        GPG_PRIVATE_KEY: ${{ inputs.gpg-private-key }}
-        GPG_PASSPHRASE: ${{ inputs.gpg-passphrase }}
-        DEB_DIR: ${{ github.event.client_payload.deb_dir }}
-        DIST: ${{ github.event.client_payload.distribution }}
-      run: |
-        echo "$GPG_PRIVATE_KEY" | gpg --batch --yes --import
-        
-        RELEASE="_pages/$DEB_DIR/dists/$DIST/Release"
-        RELEASE_DIR="$(dirname "$RELEASE")"
-        
-        sign() {
-          local extra_args="$1"
-          local output="$2"
-          if [ -n "$GPG_PASSPHRASE" ]; then
-            echo "$GPG_PASSPHRASE" | gpg --batch --yes --armor \
-              --pinentry-mode loopback --passphrase-fd 0 \
-              $extra_args -o "$output" "$RELEASE"
-          else
-            gpg --batch --yes --armor $extra_args -o "$output" "$RELEASE"
-          fi
-        }
-        
-        sign "--detach-sign" "${RELEASE}.gpg"
-        sign "--clearsign" "${RELEASE_DIR}/InRelease"
-        gpg --armor --export > "_pages/$DEB_DIR/pubkey.gpg"
-        
-        echo "✓ Signed repository with GPG"
-
-    - name: Commit and push to pages repo
-      if: steps.detect-mode.outputs.mode == 'publish'
+    - name: Commit and push (receive)
+      if: env.MODE == 'receive'
       shell: bash
       working-directory: _pages
       env:
@@ -337,17 +378,448 @@ runs:
         SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
         PAGES_BRANCH: ${{ github.event.client_payload.pages_branch }}
       run: |
-        git config user.name "github-actions[bot]"
+        git config user.name  "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        
+
         git add "$DEB_DIR/"
-        
+
         if git diff --staged --quiet; then
           echo "⚠️  No changes to commit"
           exit 0
         fi
-        
+
         git commit -m "chore: publish ${PKG_NAME} ${PKG_VERSION} from ${SOURCE_REPO}"
         git push origin "$PAGES_BRANCH"
-        
-        echo "✓ Published to pages repository"
+        echo "✓ Published"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SIGN
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: Install sign tools
+      if: env.MODE == 'sign'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq gnupg >/dev/null 2>&1
+
+    - name: Checkout pages repository (sign)
+      if: env.MODE == 'sign'
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ inputs.pages-branch }}
+        token: ${{ github.token }}
+        path: _pages
+
+    - name: Sign APT repository
+      if: env.MODE == 'sign'
+      shell: bash
+      env:
+        GPG_PRIVATE_KEY: ${{ inputs.gpg-private-key }}
+        GPG_PASSPHRASE: ${{ inputs.gpg-passphrase }}
+        DEB_DIR: ${{ inputs.deb-dir }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+      run: |
+        if [ -z "$GPG_PRIVATE_KEY" ]; then
+          echo "::error::gpg-private-key is required in sign mode"
+          exit 1
+        fi
+
+        DIST="${DISTRIBUTION:-stable}"
+        RELEASE="_pages/$DEB_DIR/dists/$DIST/Release"
+
+        if [ ! -f "$RELEASE" ]; then
+          echo "::error::Release file not found: $RELEASE"
+          exit 1
+        fi
+
+        RELEASE_DIR="$(dirname "$RELEASE")"
+
+        echo "$GPG_PRIVATE_KEY" | gpg --batch --yes --import
+
+        sign() {
+          if [ -n "$GPG_PASSPHRASE" ]; then
+            echo "$GPG_PASSPHRASE" | gpg --batch --yes --armor \
+              --pinentry-mode loopback --passphrase-fd 0 \
+              $1 -o "$2" "$RELEASE"
+          else
+            gpg --batch --yes --armor $1 -o "$2" "$RELEASE"
+          fi
+        }
+
+        sign "--detach-sign" "${RELEASE}.gpg"
+        sign "--clearsign"   "${RELEASE_DIR}/InRelease"
+        gpg --armor --export > "_pages/$DEB_DIR/pubkey.gpg"
+
+        echo "✓ Signed distribution: $DIST"
+
+    - name: Commit and push (sign)
+      if: env.MODE == 'sign'
+      shell: bash
+      working-directory: _pages
+      env:
+        DEB_DIR: ${{ inputs.deb-dir }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        PAGES_BRANCH: ${{ inputs.pages-branch }}
+      run: |
+        DIST="${DISTRIBUTION:-stable}"
+
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        git add "$DEB_DIR/"
+
+        if git diff --staged --quiet; then
+          echo "⚠️  No signature changes to commit"
+          exit 0
+        fi
+
+        git commit -m "chore: sign APT repository ($DIST)"
+        git push origin "$PAGES_BRANCH"
+        echo "✓ Pushed"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # LIST
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: Checkout pages repository (list)
+      if: env.MODE == 'list'
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ inputs.pages-branch }}
+        path: _pages
+
+    - name: List packages
+      if: env.MODE == 'list'
+      shell: bash
+      env:
+        DEB_DIR: ${{ inputs.deb-dir }}
+        DIST_FILTER: ${{ inputs.distribution }}
+      run: |
+        BASE="_pages/$DEB_DIR"
+
+        if [ ! -d "$BASE" ]; then
+          echo "⚠️  APT directory '$BASE' does not exist yet — nothing published."
+          exit 0
+        fi
+
+        {
+          echo "# APT Repository: \`$DEB_DIR\`"
+          echo ""
+
+          # ── Pool summary ───────────────────────────────────────────────────
+          echo "## Pool files"
+          echo ""
+          if [ -d "$BASE/pool" ]; then
+            total=$(find "$BASE/pool" -name "*.deb" | wc -l)
+            echo "**$total .deb file(s) in pool**"
+            echo ""
+            find "$BASE/pool" -name "*.deb" | sort | while read -r deb; do
+              echo "- \`${deb#"$BASE/"}\`"
+            done
+          else
+            echo "_Pool is empty._"
+          fi
+          echo ""
+
+          # ── Per-distribution package index ─────────────────────────────────
+          echo "## Published packages"
+          echo ""
+
+          if [ ! -d "$BASE/dists" ]; then
+            echo "_No distributions found._"
+          else
+            found_dist=false
+            for dist_path in "$BASE/dists"/*/; do
+              [ -d "$dist_path" ] || continue
+              dist=$(basename "$dist_path")
+
+              if [ -n "$DIST_FILTER" ] && [ "$dist" != "$DIST_FILTER" ]; then
+                continue
+              fi
+              found_dist=true
+
+              echo "### Distribution: \`$dist\`"
+              echo ""
+
+              found_comp=false
+              for comp_path in "$dist_path"*/; do
+                [ -d "$comp_path" ] || continue
+                comp=$(basename "$comp_path")
+                [[ "$comp" == binary-* ]] && continue
+                found_comp=true
+
+                echo "#### Component: \`$comp\`"
+                echo ""
+
+                found_arch=false
+                for arch_path in "${comp_path}binary-"*/; do
+                  [ -d "$arch_path" ] || continue
+                  arch=$(basename "$arch_path" | sed 's/binary-//')
+                  found_arch=true
+
+                  echo "**Architecture: \`$arch\`**"
+                  echo ""
+
+                  packages_file="${arch_path}Packages"
+                  if [ ! -f "$packages_file" ]; then
+                    echo "_No Packages index._"
+                    echo ""
+                    continue
+                  fi
+
+                  pkg_count=$(grep -c "^Package:" "$packages_file" 2>/dev/null || echo 0)
+                  if [ "$pkg_count" -eq 0 ]; then
+                    echo "_No packages indexed._"
+                    echo ""
+                    continue
+                  fi
+
+                  echo "| Package | Version | Architecture | Size |"
+                  echo "|---------|---------|--------------|------|"
+
+                  pkg_name="" pkg_version="" pkg_arch="" pkg_size=""
+                  while IFS= read -r line; do
+                    case "$line" in
+                      "Package: "*)      pkg_name="${line#Package: }" ;;
+                      "Version: "*)      pkg_version="${line#Version: }" ;;
+                      "Architecture: "*) pkg_arch="${line#Architecture: }" ;;
+                      "Size: "*)         pkg_size="${line#Size: }" ;;
+                      "")
+                        if [ -n "$pkg_name" ]; then
+                          size_kb=$(( (${pkg_size:-0} + 512) / 1024 ))
+                          echo "| \`$pkg_name\` | $pkg_version | $pkg_arch | ${size_kb} kB |"
+                          pkg_name="" pkg_version="" pkg_arch="" pkg_size=""
+                        fi
+                        ;;
+                    esac
+                  done < "$packages_file"
+                  if [ -n "$pkg_name" ]; then
+                    size_kb=$(( (${pkg_size:-0} + 512) / 1024 ))
+                    echo "| \`$pkg_name\` | $pkg_version | $pkg_arch | ${size_kb} kB |"
+                  fi
+                  echo ""
+                done
+
+                $found_arch || echo "_No architecture directories found._"
+                echo ""
+              done
+
+              $found_comp || echo "_No components found._"
+              echo ""
+            done
+
+            $found_dist || echo "_No matching distribution found._"
+          fi
+
+          # ── Signing status ─────────────────────────────────────────────────
+          echo "## Signing status"
+          echo ""
+          if [ -f "$BASE/pubkey.gpg" ]; then
+            key_info=$(gpg --with-colons --import-options show-only \
+              --import "$BASE/pubkey.gpg" 2>/dev/null \
+              | awk -F: '/^pub/{print $5, $10}' | head -1)
+            echo "✅ Repository is signed — public key at \`$DEB_DIR/pubkey.gpg\`"
+            if [ -n "$key_info" ]; then
+              echo ""
+              echo "\`\`\`"
+              echo "$key_info"
+              echo "\`\`\`"
+            fi
+          else
+            echo "⚠️  No \`pubkey.gpg\` found — repository is unsigned."
+          fi
+
+        } | tee "$GITHUB_STEP_SUMMARY"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # DELETE
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: Install delete tools
+      if: env.MODE == 'delete'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq dpkg-dev apt-utils >/dev/null 2>&1
+
+    - name: Checkout pages repository (delete)
+      if: env.MODE == 'delete'
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ inputs.pages-branch }}
+        token: ${{ github.token }}
+        path: _pages
+
+    - name: Find matching packages
+      if: env.MODE == 'delete'
+      id: delete-find
+      shell: bash
+      env:
+        PKG_NAME: ${{ inputs.package-name }}
+        PKG_VERSION: ${{ inputs.version }}
+        DEB_DIR: ${{ inputs.deb-dir }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        [ -z "$PKG_NAME" ] \
+          && echo "::error::package-name is required in delete mode" && exit 1
+
+        POOL_DIR="_pages/$DEB_DIR/pool"
+
+        if [ ! -d "$POOL_DIR" ]; then
+          echo "::error::Pool directory '$POOL_DIR' does not exist."
+          exit 1
+        fi
+
+        if [ -n "$PKG_VERSION" ]; then
+          PATTERN="${PKG_NAME}_${PKG_VERSION}_*.deb"
+        else
+          PATTERN="${PKG_NAME}_*.deb"
+        fi
+
+        echo "Searching for: $PATTERN"
+
+        mapfile -t FOUND < <(find "$POOL_DIR" -name "$PATTERN" | sort)
+
+        if [ ${#FOUND[@]} -eq 0 ]; then
+          echo "::warning::No packages found matching '$PATTERN' — nothing to remove."
+          echo "count=0"       >> "$GITHUB_OUTPUT"
+          echo "removed=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "Packages found:"
+          for f in "${FOUND[@]}"; do echo "  🗑️  $(basename "$f")"; done
+
+          echo "count=${#FOUND[@]}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "${FOUND[@]}" > /tmp/packages-to-delete.txt
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo ""
+            echo "DRY RUN — no files deleted. Re-run with dry-run: false to apply."
+            echo "removed=false" >> "$GITHUB_OUTPUT"
+          else
+            while IFS= read -r f; do
+              rm -f "$f"
+              echo "✓ Removed: $(basename "$f")"
+            done < /tmp/packages-to-delete.txt
+            echo "removed=true" >> "$GITHUB_OUTPUT"
+          fi
+        fi
+
+    - name: Regenerate APT metadata (delete)
+      if: env.MODE == 'delete' && steps.delete-find.outputs.removed == 'true'
+      shell: bash
+      env:
+        DEB_DIR: ${{ inputs.deb-dir }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        COMPONENT: ${{ inputs.component }}
+      run: |
+        DIST="${DISTRIBUTION:-stable}"
+        COMP="${COMPONENT:-main}"
+        BASE="_pages/$DEB_DIR"
+        COMP_DIR="$BASE/dists/$DIST/$COMP"
+
+        if [ ! -d "$COMP_DIR" ]; then
+          echo "::error::Component directory '$COMP_DIR' not found."
+          exit 1
+        fi
+
+        shopt -s nullglob
+        arch_dirs=("$COMP_DIR/binary-"*/)
+        shopt -u nullglob
+
+        if [ ${#arch_dirs[@]} -eq 0 ]; then
+          echo "::warning::No architecture directories found under $COMP_DIR"
+        fi
+
+        ARCHS=()
+        for arch_path in "${arch_dirs[@]}"; do
+          arch=$(basename "$arch_path" | sed 's/binary-//')
+          ARCHS+=("$arch")
+
+          cd "$BASE"
+          dpkg-scanpackages --multiversion pool/ \
+            > "dists/$DIST/$COMP/binary-$arch/Packages"
+          gzip -k -f "dists/$DIST/$COMP/binary-$arch/Packages"
+          echo "✓ Regenerated Packages for arch: $arch"
+        done
+
+        cd "$BASE/dists/$DIST"
+        {
+          echo "Origin: ${GITHUB_REPOSITORY_OWNER}"
+          echo "Label: ${GITHUB_REPOSITORY##*/}"
+          echo "Suite: $DIST"
+          echo "Codename: $DIST"
+          echo "Architectures: ${ARCHS[*]}"
+          echo "Components: $COMP"
+          echo "Description: APT Repository"
+          apt-ftparchive release .
+        } > Release
+        echo "✓ Regenerated Release"
+
+    - name: Commit and push (delete)
+      if: env.MODE == 'delete' && steps.delete-find.outputs.removed == 'true'
+      shell: bash
+      working-directory: _pages
+      env:
+        DEB_DIR: ${{ inputs.deb-dir }}
+        PKG_NAME: ${{ inputs.package-name }}
+        PKG_VERSION: ${{ inputs.version }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        PAGES_BRANCH: ${{ inputs.pages-branch }}
+      run: |
+        DIST="${DISTRIBUTION:-stable}"
+
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        git add "$DEB_DIR/"
+
+        if git diff --staged --quiet; then
+          echo "⚠️  No changes to commit"
+          exit 0
+        fi
+
+        if [ -n "$PKG_VERSION" ]; then
+          MSG="chore: delete ${PKG_NAME} ${PKG_VERSION} from ${DIST}"
+        else
+          MSG="chore: delete all versions of ${PKG_NAME} from ${DIST}"
+        fi
+
+        git commit -m "$MSG"
+        git push origin "$PAGES_BRANCH"
+        echo "✓ Pushed"
+
+    - name: Delete summary
+      if: env.MODE == 'delete'
+      shell: bash
+      env:
+        PKG_NAME: ${{ inputs.package-name }}
+        PKG_VERSION: ${{ inputs.version }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        COMPONENT: ${{ inputs.component }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        FOUND: ${{ steps.delete-find.outputs.count }}
+        REMOVED: ${{ steps.delete-find.outputs.removed }}
+      run: |
+        DIST="${DISTRIBUTION:-stable}"
+        COMP="${COMPONENT:-main}"
+
+        {
+          echo "# Delete Package Summary"
+          echo ""
+          echo "| Field | Value |"
+          echo "|-------|-------|"
+          echo "| Package      | \`$PKG_NAME\` |"
+          echo "| Version      | ${PKG_VERSION:-_(all versions)_} |"
+          echo "| Distribution | \`$DIST\` |"
+          echo "| Component    | \`$COMP\` |"
+          echo "| Dry run      | $DRY_RUN |"
+          echo "| Files found  | $FOUND |"
+          echo ""
+          if   [ "$DRY_RUN"  = "true" ]; then
+            echo "⚠️ **Dry run** — no changes were applied."
+          elif [ "$REMOVED"  = "true" ]; then
+            echo "✅ **Done** — $FOUND file(s) removed and metadata regenerated."
+          elif [ "$FOUND"    = "0"    ]; then
+            echo "ℹ️  **Nothing to do** — no matching packages found."
+          else
+            echo "❌ **Failed** — check the workflow logs for details."
+          fi
+        } | tee "$GITHUB_STEP_SUMMARY"
