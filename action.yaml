@@ -145,7 +145,7 @@ runs:
             MODE="$MODE_INPUT"
             ;;
           publish|dispatch|'')
-            if [ "$EVENT_NAME" = "repository_dispatch" ] || [ "$EVENT_NAME" = "workflow_call" ]; then
+            if [ "$EVENT_NAME" = "repository_dispatch" ]; then
               MODE="receive"
             else
               MODE="dispatch"
