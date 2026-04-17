@@ -169,6 +169,7 @@ runs:
         [ ! -f "$PACKAGE_DIR/DEBIAN/control" ] \
           && echo "::error::Missing DEBIAN/control in $PACKAGE_DIR" && exit 1
 
+        mkdir -p "$(dirname "$OUTPUT_PATH")"
         dpkg-deb --build "$PACKAGE_DIR" "$OUTPUT_PATH"
         echo "✓ Built: $OUTPUT_PATH"
         echo "deb-path=$OUTPUT_PATH" >> "$GITHUB_OUTPUT"

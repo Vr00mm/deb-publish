@@ -1,9 +1,7 @@
-name: Test — publish hello-world .deb
+name: Test Publish
 
 on:
   push:
-    tags:
-      - 'v*'
 
 jobs:
   publish:
@@ -15,7 +13,7 @@ jobs:
 
       - name: Stamp version into control file
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="0.0.0-$(git rev-parse --short HEAD)"
           sed -i "s/^Version:.*/Version: $VERSION/" setup/package/DEBIAN/control
 
       - name: Build .deb
