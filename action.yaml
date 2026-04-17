@@ -38,6 +38,24 @@ inputs:
     description: '[publish] Pages repository (owner/repo), e.g. myorg/myorg.github.io'
     required: false
 
+  # ── publish — pages repo side (receive via workflow_call) ─────────────────
+  source-repo:
+    description: '[receive] Source repository (owner/repo) to download the artifact from.'
+    required: false
+    default: ''
+  run-id:
+    description: '[receive] Workflow run ID in the source repository.'
+    required: false
+    default: ''
+  artifact-name:
+    description: '[receive] Name of the artifact containing the .deb file.'
+    required: false
+    default: ''
+  source-token:
+    description: '[receive] Token with actions:read on the source repository.'
+    required: false
+    default: ''
+
   # ── shared: publish (both sides) · sign · list · delete ───────────────────
   pages-branch:
     description: 'Branch of the pages repository.'
@@ -127,7 +145,7 @@ runs:
             MODE="$MODE_INPUT"
             ;;
           publish|dispatch|'')
-            if [ "$EVENT_NAME" = "repository_dispatch" ]; then
+            if [ "$EVENT_NAME" = "repository_dispatch" ] || [ "$EVENT_NAME" = "workflow_call" ]; then
               MODE="receive"
             else
               MODE="dispatch"
@@ -307,10 +325,10 @@ runs:
       if: env.MODE == 'receive'
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
-        SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
-        RUN_ID: ${{ github.event.client_payload.run_id }}
-        ARTIFACT_NAME: ${{ github.event.client_payload.artifact_name }}
+        GH_TOKEN: ${{ inputs.source-token || github.token }}
+        SOURCE_REPO: ${{ inputs.source-repo || github.event.client_payload.source_repo }}
+        RUN_ID: ${{ inputs.run-id || github.event.client_payload.run_id }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name || github.event.client_payload.artifact_name }}
       run: |
         mkdir -p /tmp/deb-incoming
         cd /tmp/deb-incoming
@@ -324,11 +342,27 @@ runs:
         [ -z "$DEB_FILE" ] && echo "::error::No .deb file found in artifact" && exit 1
         echo "✓ Downloaded: $DEB_FILE"
 
+    - name: Extract package metadata (receive)
+      if: env.MODE == 'receive'
+      id: receive-metadata
+      shell: bash
+      run: |
+        DEB_FILE=$(ls /tmp/deb-incoming/*.deb | head -1)
+        PKG_NAME=$(dpkg-deb    -f "$DEB_FILE" Package)
+        PKG_VERSION=$(dpkg-deb -f "$DEB_FILE" Version)
+        PKG_ARCH=$(dpkg-deb    -f "$DEB_FILE" Architecture)
+
+        echo "package-name=$PKG_NAME"       >> "$GITHUB_OUTPUT"
+        echo "package-version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+        echo "package-arch=$PKG_ARCH"       >> "$GITHUB_OUTPUT"
+
+        echo "📦 $PKG_NAME $PKG_VERSION ($PKG_ARCH)"
+
     - name: Checkout pages repository (receive)
       if: env.MODE == 'receive'
       uses: actions/checkout@v6
       with:
-        ref: ${{ github.event.client_payload.pages_branch }}
+        ref: ${{ inputs.pages-branch || github.event.client_payload.pages_branch }}
         token: ${{ github.token }}
         path: _pages
 
@@ -336,10 +370,10 @@ runs:
       if: env.MODE == 'receive'
       shell: bash
       env:
-        PKG_ARCH: ${{ github.event.client_payload.package_arch }}
-        DIST: ${{ github.event.client_payload.distribution }}
-        COMP: ${{ github.event.client_payload.component }}
-        DEB_DIR: ${{ github.event.client_payload.deb_dir }}
+        PKG_ARCH: ${{ steps.receive-metadata.outputs.package-arch }}
+        DIST: ${{ inputs.distribution || github.event.client_payload.distribution }}
+        COMP: ${{ inputs.component || github.event.client_payload.component }}
+        DEB_DIR: ${{ inputs.deb-dir || github.event.client_payload.deb_dir }}
       run: |
         BASE="_pages/$DEB_DIR"
         POOL_DIR="$BASE/pool/$COMP"
@@ -373,11 +407,11 @@ runs:
       shell: bash
       working-directory: _pages
       env:
-        DEB_DIR: ${{ github.event.client_payload.deb_dir }}
-        PKG_NAME: ${{ github.event.client_payload.package_name }}
-        PKG_VERSION: ${{ github.event.client_payload.package_version }}
-        SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
-        PAGES_BRANCH: ${{ github.event.client_payload.pages_branch }}
+        DEB_DIR: ${{ inputs.deb-dir || github.event.client_payload.deb_dir }}
+        PKG_NAME: ${{ steps.receive-metadata.outputs.package-name }}
+        PKG_VERSION: ${{ steps.receive-metadata.outputs.package-version }}
+        SOURCE_REPO: ${{ inputs.source-repo || github.event.client_payload.source_repo }}
+        PAGES_BRANCH: ${{ inputs.pages-branch || github.event.client_payload.pages_branch }}
       run: |
         git config user.name  "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"

@@ -1,8 +1,40 @@
 name: Publish Package to APT Repository
 
 on:
-  repository_dispatch:
-    types: [publish-deb]
+  workflow_call:
+    inputs:
+      source_repo:
+        description: 'Source repository (owner/repo)'
+        required: true
+        type: string
+      run_id:
+        description: 'Workflow run ID in the source repository'
+        required: true
+        type: string
+      artifact_name:
+        description: 'Name of the artifact containing the .deb file'
+        required: true
+        type: string
+      distribution:
+        description: 'APT distribution (e.g. stable, focal)'
+        type: string
+        default: stable
+      component:
+        description: 'APT component (e.g. main)'
+        type: string
+        default: main
+      deb_dir:
+        description: 'APT repository root directory in this repo'
+        type: string
+        default: apt
+      pages_branch:
+        description: 'Branch of this pages repository'
+        type: string
+        default: master
+    secrets:
+      source_token:
+        description: 'Token with actions:read on the source repository'
+        required: true
 
 # Force sequential execution to prevent race conditions on the APT index
 concurrency:
@@ -16,13 +48,28 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v6
+
       - name: Publish to APT repository
         uses: Vr00mm/deb-publish@v2
+        with:
+          mode: receive
+          source-repo: ${{ inputs.source_repo }}
+          run-id: ${{ inputs.run_id }}
+          artifact-name: ${{ inputs.artifact_name }}
+          source-token: ${{ secrets.source_token }}
+          distribution: ${{ inputs.distribution }}
+          component: ${{ inputs.component }}
+          deb-dir: ${{ inputs.deb_dir }}
+          pages-branch: ${{ inputs.pages_branch }}
 
       - name: Sign APT repository
         uses: Vr00mm/deb-publish@v2
         with:
           mode: sign
-          distribution: ${{ github.event.client_payload.distribution }}
+          distribution: ${{ inputs.distribution }}
+          component: ${{ inputs.component }}
+          deb-dir: ${{ inputs.deb_dir }}
+          pages-branch: ${{ inputs.pages_branch }}
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}

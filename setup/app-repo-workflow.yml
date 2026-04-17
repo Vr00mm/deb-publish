@@ -10,30 +10,24 @@ jobs:
     permissions:
       contents: write
 
-    strategy:
-      matrix:
-        include:
-          - goarch: amd64
-            debarch: amd64
-          - goarch: arm64
-            debarch: arm64
+    outputs:
+      artifact-name: ${{ steps.artifact.outputs.name }}
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Prepare package metadata
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sed -i "s/^Version:.*/Version: $VERSION/" package/DEBIAN/control
 
       # Adapt this step to your build process
       - name: Build binary
         env:
           CGO_ENABLED: "0"
           GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
+          GOARCH: amd64
         run: go build -trimpath -ldflags='-s -w' -o package/usr/bin/myapp ./cmd/myapp/
-
-      - name: Prepare package metadata
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          sed -i "s/^Version:.*/Version: $VERSION/" package/DEBIAN/control
-          sed -i "s/^Architecture:.*/Architecture: ${{ matrix.debarch }}/" package/DEBIAN/control
 
       - name: Build .deb
         id: build
@@ -41,11 +35,26 @@ jobs:
         with:
           mode: build
           package-dir: package
-          output-path: dist/myapp_${{ matrix.debarch }}.deb
+          output-path: dist/myapp_amd64.deb
 
-      - name: Publish to APT repository
-        uses: Vr00mm/deb-publish@v2
+      - name: Compute artifact name
+        id: artifact
+        run: |
+          NAME="deb-${{ steps.build.outputs.package-name }}-${{ steps.build.outputs.package-version }}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
         with:
-          deb-path: ${{ steps.build.outputs.deb-path }}
-          token: ${{ secrets.PAGES_REPO_TOKEN }}
-          pages-repo: your-org/your-org.github.io  # Replace with your pages repo
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.build.outputs.deb-path }}
+          retention-days: 1
+
+  publish:
+    needs: build
+    uses: your-org/your-org.github.io/.github/workflows/publish-deb.yml@master  # Replace with your pages repo
+    with:
+      source_repo: ${{ github.repository }}
+      run_id: ${{ github.run_id }}
+      artifact_name: ${{ needs.build.outputs.artifact-name }}
+    secrets:
+      source_token: ${{ secrets.GITHUB_TOKEN }}
