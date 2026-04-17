@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            debarch: amd64
+          - goarch: arm64
+            debarch: arm64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Adapt this step to your build process
+      - name: Build binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -ldflags='-s -w' -o package/usr/bin/myapp ./cmd/myapp/
+
+      - name: Prepare package metadata
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sed -i "s/^Version:.*/Version: $VERSION/" package/DEBIAN/control
+          sed -i "s/^Architecture:.*/Architecture: ${{ matrix.debarch }}/" package/DEBIAN/control
+
+      - name: Build .deb
+        id: build
+        uses: Vr00mm/deb-publish@v2
+        with:
+          mode: build
+          package-dir: package
+          output-path: dist/myapp_${{ matrix.debarch }}.deb
+
+      - name: Publish to APT repository
+        uses: Vr00mm/deb-publish@v2
+        with:
+          deb-path: ${{ steps.build.outputs.deb-path }}
+          token: ${{ secrets.PAGES_REPO_TOKEN }}
+          pages-repo: your-org/your-org.github.io  # Replace with your pages repo

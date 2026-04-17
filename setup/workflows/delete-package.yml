@@ -1,0 +1,62 @@
+name: Delete Package from APT Repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      package-name:
+        description: 'Package name to delete (e.g. myapp)'
+        required: true
+      version:
+        description: 'Version to delete — leave empty to delete ALL versions'
+        required: false
+        default: ''
+      distribution:
+        description: 'Distribution to update after deletion (default: stable)'
+        required: false
+        default: ''
+      component:
+        description: 'Component to update after deletion (default: main)'
+        required: false
+        default: ''
+      deb-dir:
+        description: 'APT repository directory'
+        required: false
+        default: 'apt'
+      dry-run:
+        description: 'Preview what would be deleted without applying changes'
+        type: boolean
+        required: false
+        default: false
+
+# Share the same concurrency lock as publish to avoid metadata conflicts
+concurrency:
+  group: apt-repository-update
+  cancel-in-progress: false
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Delete package
+        uses: Vr00mm/deb-publish@v2
+        with:
+          mode: delete
+          package-name: ${{ inputs.package-name }}
+          version: ${{ inputs.version }}
+          distribution: ${{ inputs.distribution }}
+          component: ${{ inputs.component }}
+          deb-dir: ${{ inputs.deb-dir }}
+          dry-run: ${{ inputs.dry-run }}
+
+      - name: Sign APT repository
+        if: ${{ inputs.dry-run != 'true' }}
+        uses: Vr00mm/deb-publish@v2
+        with:
+          mode: sign
+          distribution: ${{ inputs.distribution }}
+          deb-dir: ${{ inputs.deb-dir }}
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}

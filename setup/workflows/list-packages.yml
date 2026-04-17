@@ -1,0 +1,25 @@
+name: List APT Repository Contents
+
+on:
+  workflow_dispatch:
+    inputs:
+      deb-dir:
+        description: 'APT repository directory'
+        required: false
+        default: 'apt'
+      distribution:
+        description: 'Filter by distribution (leave empty for all)'
+        required: false
+        default: ''
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: List packages
+        uses: Vr00mm/deb-publish@v2
+        with:
+          mode: list
+          deb-dir: ${{ inputs.deb-dir }}
+          distribution: ${{ inputs.distribution }}

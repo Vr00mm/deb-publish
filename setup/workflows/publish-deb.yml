@@ -1,0 +1,28 @@
+name: Publish Package to APT Repository
+
+on:
+  repository_dispatch:
+    types: [publish-deb]
+
+# Force sequential execution to prevent race conditions on the APT index
+concurrency:
+  group: apt-repository-update
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Publish to APT repository
+        uses: Vr00mm/deb-publish@v2
+
+      - name: Sign APT repository
+        uses: Vr00mm/deb-publish@v2
+        with:
+          mode: sign
+          distribution: ${{ github.event.client_payload.distribution }}
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: ${{ secrets.GPG_PASSPHRASE }}
