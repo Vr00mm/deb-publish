@@ -334,10 +334,10 @@ runs:
               --repo "$PAGES_REPO" \
               --event repository_dispatch \
               --limit 10 \
-              --json id,createdAt \
+              --json databaseId,createdAt \
             | jq --argjson ts "$DISPATCH_TS" \
                 '[.[] | select(.createdAt | fromdateiso8601 >= $ts)]
-                 | sort_by(.createdAt) | last | .id // empty'
+                 | sort_by(.createdAt) | last | .databaseId // empty'
           )
           [ -n "$PAGES_RUN_ID" ] && break
           sleep 3
