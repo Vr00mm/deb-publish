@@ -51,6 +51,8 @@ jobs:
 
   publish:
     needs: build
+    permissions:
+      contents: write
     uses: your-org/your-org.github.io/.github/workflows/publish-deb.yml@master  # Replace with your pages repo
     with:
       source_repo: ${{ github.repository }}
