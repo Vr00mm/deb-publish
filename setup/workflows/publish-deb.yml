@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Publish to APT repository
         uses: Vr00mm/deb-publish@v2
+        with:
+          source-token: ${{ secrets.SOURCE_TOKEN }}
 
       - name: Sign APT repository
         uses: Vr00mm/deb-publish@v2
