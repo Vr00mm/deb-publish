@@ -280,9 +280,27 @@ runs:
         RUN_ID: ${{ github.run_id }}
         ARTIFACT_NAME: deb-package-${{ steps.dispatch-metadata.outputs.package-name }}-${{ steps.dispatch-metadata.outputs.package-version }}
         FOLLOW: ${{ inputs.follow }}
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         DIST="${DISTRIBUTION:-stable}"
         COMP="${COMPONENT:-main}"
+
+        # Get a pre-signed blob URL for the artifact using our own GITHUB_TOKEN
+        # (avoids cross-repo 404 when source run is still in-progress during watch)
+        ARTIFACT_ID=$(GH_TOKEN="$GITHUB_TOKEN" gh api \
+          "repos/$SOURCE_REPO/actions/runs/$RUN_ID/artifacts" \
+          --jq ".artifacts[] | select(.name == \"$ARTIFACT_NAME\") | .id")
+
+        if [ -z "$ARTIFACT_ID" ]; then
+          echo "::error::Artifact '$ARTIFACT_NAME' not found in run $RUN_ID"
+          exit 1
+        fi
+
+        ARTIFACT_URL=$(curl -s -o /dev/null -w '%{redirect_url}' \
+          -H "Authorization: Bearer $GITHUB_TOKEN" \
+          "https://api.github.com/repos/$SOURCE_REPO/actions/artifacts/$ARTIFACT_ID/zip")
+
+        echo "✓ Got artifact pre-signed URL"
 
         DISPATCH_TS=$(date -u +%s)
 
@@ -295,6 +313,7 @@ runs:
             --arg source_repo     "$SOURCE_REPO" \
             --arg run_id          "$RUN_ID" \
             --arg artifact_name   "$ARTIFACT_NAME" \
+            --arg artifact_url    "$ARTIFACT_URL" \
             --arg package_name    "$PKG_NAME" \
             --arg package_version "$PKG_VERSION" \
             --arg package_arch    "$PKG_ARCH" \
@@ -306,6 +325,7 @@ runs:
               source_repo:     $source_repo,
               run_id:          $run_id,
               artifact_name:   $artifact_name,
+              artifact_url:    $artifact_url,
               package_name:    $package_name,
               package_version: $package_version,
               package_arch:    $package_arch,
@@ -373,18 +393,27 @@ runs:
         SOURCE_REPO: ${{ inputs.source-repo || github.event.client_payload.source_repo }}
         RUN_ID: ${{ inputs.run-id || github.event.client_payload.run_id }}
         ARTIFACT_NAME: ${{ inputs.artifact-name || github.event.client_payload.artifact_name }}
+        ARTIFACT_URL: ${{ github.event.client_payload.artifact_url }}
       run: |
         mkdir -p /tmp/deb-incoming
-        cd /tmp/deb-incoming
 
-        echo "Downloading $ARTIFACT_NAME from $SOURCE_REPO (run $RUN_ID)..."
-        gh run download "$RUN_ID" \
-          --repo "$SOURCE_REPO" \
-          --name "$ARTIFACT_NAME"
+        if [ -n "$ARTIFACT_URL" ]; then
+          echo "Downloading artifact via pre-signed URL..."
+          curl -sL -o /tmp/deb-incoming/artifact.zip "$ARTIFACT_URL"
+          cd /tmp/deb-incoming
+          unzip -o artifact.zip
+          rm -f artifact.zip
+        else
+          cd /tmp/deb-incoming
+          echo "Downloading $ARTIFACT_NAME from $SOURCE_REPO (run $RUN_ID)..."
+          gh run download "$RUN_ID" \
+            --repo "$SOURCE_REPO" \
+            --name "$ARTIFACT_NAME"
+        fi
 
-        DEB_FILE=$(ls *.deb 2>/dev/null | head -1)
+        DEB_FILE=$(ls /tmp/deb-incoming/*.deb 2>/dev/null | head -1)
         [ -z "$DEB_FILE" ] && echo "::error::No .deb file found in artifact" && exit 1
-        echo "✓ Downloaded: $DEB_FILE"
+        echo "✓ Downloaded: $(basename "$DEB_FILE")"
 
     - name: Extract package metadata (receive)
       if: env.MODE == 'receive'
